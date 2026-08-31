@@ -1,0 +1,41 @@
+# ---- 构建产物 ----
+build/
+out/
+[Dd]ebug/
+[Rr]elease/
+*.obj
+*.exe
+*.pdb
+*.ilk
+*.lib
+*.dll
+
+# ---- Visual Studio / VS Code ----
+.vs/
+*.user
+*.suo
+CMakeUserPresets.json
+.vscode/*
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/c_cpp_properties.json
+!.vscode/extensions.json
+
+# ---- Python（GUI）----
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+dist/
+*.spec
+
+# ---- 课程参考资料 ----
+# 仓库是公开的，而这些 PDF 是老师的课件、不是我们的作品，加起来还有 25MB。
+# 需要的人从课程平台自己下。
+refMateris/
+
+# ---- 杂项 ----
+.DS_Store
+Thumbs.db
+*.log
+*.cbk

@@ -1,0 +1,59 @@
+name: CI
+
+# 每次 push 到 main、以及每个 Pull Request 都会跑。
+# main 分支设了保护规则，这个流程不通过就合不进去。
+#
+# 这一个文件同时兑现评分表里的两项：
+#   · 源码质量 → 是否能自动化构建
+#   · PPT 得分 → 版本管理工具使用情况
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build-and-test:
+    name: 构建与测试 (Windows)
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: code
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 配置
+        run: cmake --preset msvc
+
+      - name: 构建
+        run: cmake --build --preset release
+
+      - name: 单元测试
+        run: ctest --preset release
+
+      - name: 冒烟测试 cbk info
+        run: .\build\msvc\bin\Release\cbk.exe info
+
+      - name: 上传可执行文件
+        uses: actions/upload-artifact@v4
+        with:
+          name: cbk-windows-x64
+          path: code/build/msvc/bin/Release/cbk.exe
+          if-no-files-found: error
+
+  lint:
+    name: 代码规范检查
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 安装 cpplint
+        run: pip install cpplint
+
+      - name: 检查 core 与 cli
+        run: cpplint --recursive code/core code/cli
