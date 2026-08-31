@@ -48,11 +48,33 @@ scripts/            格式化、注释率统计
 
 ## 分工
 
-| 模块 | 负责人 |
-|---|---|
-| 基础备份还原、文件类型支持、元数据支持 | Z |
-| 打包解包、压缩解压 | 队友 A |
-| 加密解密、图形界面 | 队友 B |
+提 issue 时按下表打标签，全部标签见 [Labels 页面](https://github.com/urab547/CBK/labels)。
+
+| 模块 | 负责人 | Issue 标签 |
+|---|---|---|
+| 基础备份还原（40 分） | [@urab547](https://github.com/urab547) | `基础备份还原` |
+| 文件类型支持（10 分） | [@urab547](https://github.com/urab547) | `文件类型支持` |
+| 元数据支持（10 分） | [@urab547](https://github.com/urab547) | `元数据支持` |
+| 打包解包（10 分/种） | [@onepiece142575-sudo](https://github.com/onepiece142575-sudo) | `打包解包` |
+| 压缩解压（10 分/种） | [@onepiece142575-sudo](https://github.com/onepiece142575-sudo) | `压缩解压` |
+| 加密解密（10 分/种） | [@27588569](https://github.com/27588569) | `加密解密` |
+| 图形界面 | [@27588569](https://github.com/27588569) | `图形界面` |
+| 测试矩阵 / 三份文档 / 注释率 | 全员 | `工程质量` |
+
+各人自己拆自己模块的 issue。评分表里「项目管理工具的使用情况」「人员分工安排情况」
+看的就是这些卡片上有没有负责人、有没有截止日期，别人代提的不算你的过程证据。
+格式照着 [#1](https://github.com/urab547/CBK/issues/1) 写：任务清单 + 已知的坑 + 验收标准。
+
+### 不用等别人写完
+
+`core/include/cbk/*.h` 四个接口头文件（`types.h` / `sink.h` / `packer.h` / `stage.h`）
+**已经冻结并合进 `main`**，拿到就能开工：
+
+- 打包器只依赖 `IPacker` + `ISink`。往返测试手捏几个 `EntryMeta` 就能写，不依赖 Scanner。
+- 压缩、加密只依赖 `IStage`。它们只认字节流，跟目录树没关系。
+- 界面可以先对着 `cbk info` 的输出和 JSON 事件协议做，拿假事件流驱动进度条。
+
+真正需要等引擎落地的只有端到端联调。
 
 新人先读 `docs/CBK组内开工说明.pdf`，再读 `CLAUDE.md`。
 排期见 `docs/项目进度.md`。
@@ -68,7 +90,42 @@ scripts/            格式化、注释率统计
 
 ## 协作
 
-- `main` 分支受保护，只接受 Pull Request，CI 不绿合不进去。
-- 分支名：`feat/core-scanner`、`feat/pack-tar`、`feat/gui` 这样。
-- 提交信息用 `类型(范围): 说明`，例如 `feat(pack): 实现 ustar 头部写入`。
-- 提交前跑 `.\scripts\format.ps1`。
+`main` 分支开了保护，**不能直接 push**。规则：
+
+- 必须走 Pull Request
+- 两个 CI 检查（`构建与测试 (Windows)`、`代码规范检查`）都得绿
+- 至少 1 人 Approve
+- 分支要先跟 `main` 同步
+- PR 上的评论要解决完
+- 禁止强推、禁止删分支
+
+### 一轮完整流程
+
+```powershell
+git checkout main; git pull
+git checkout -b feat/pack-tar     # 分支名：feat/<范围>-<东西>
+
+# ……改代码……
+
+.\scripts\format.ps1              # 提交前必跑
+git add -A
+git commit -m "feat(pack): 实现 ustar 头部的写入与解析"
+git push -u origin feat/pack-tar
+gh pr create --fill --base main
+```
+
+PR 开出来后 CI 自动跑，另外两人点 Approve，然后：
+
+```powershell
+gh pr merge --squash --delete-branch
+```
+
+### 提交信息
+
+`类型(范围): 说明`，类型用 `feat` / `fix` / `test` / `docs` / `chore`。
+这样 `git log --oneline` 直接能当答辩 PPT 里「项目进度把控」那页的素材。
+
+### 里程碑 tag
+
+`v0.1-base` / `v0.2-filetype` / `v0.3-metadata` / `v0.4-pack` / `v0.5-compress` /
+`v0.6-crypt` / `v1.0-gui`，每个 tag 对应一个能演示的版本。
