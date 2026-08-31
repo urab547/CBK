@@ -5,7 +5,7 @@
     {
       "name": "msvc",
       "displayName": "MSVC x64",
-      "//": "故意不写死 generator。写 'Visual Studio 17 2022' 的话，只要机器上装的是别的版本（CI 运行器的镜像会换），配置就直接失败。留空则由 CMake 挑本机最新的那版 Visual Studio。",
+      "description": "故意不写死 generator：写 Visual Studio 17 2022 的话，机器上装的是别的版本就配不起来（CI 运行器镜像会换版本）。留空则由 CMake 挑本机最新的 Visual Studio。",
       "architecture": "x64",
       "binaryDir": "${sourceDir}/build/msvc",
       "cacheVariables": {
