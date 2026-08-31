@@ -5,11 +5,15 @@
 
 include(FetchContent)
 
+# 用 git 按 tag 拉，不用 URL + URL_HASH。
+# 原因：GitHub 为 tag 自动生成的 .zip / .tar.gz 不保证字节稳定，
+# 它那边重新生成一次哈希就变了，CI 会突然挂在"Hash mismatch"上
+# （本项目已经踩过一次）。git 自己就保证完整性，不需要额外对哈希。
 FetchContent_Declare(
     googletest
-    URL https://github.com/google/googletest/archive/refs/tags/v1.15.2.zip
-    URL_HASH SHA256=7b42b4d6ed48810c5362c265a17faebe90dc2373c885e5216439d37927f02926
-    DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+    GIT_REPOSITORY https://github.com/google/googletest.git
+    GIT_TAG        v1.15.2
+    GIT_SHALLOW    TRUE
 )
 # MSVC 上必须加这句，否则 gtest 用的运行时库和我们的不一致，链接会失败。
 set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
