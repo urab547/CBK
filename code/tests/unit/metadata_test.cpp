@@ -2,11 +2,15 @@
 
 #include <windows.h>
 
+#include <aclapi.h>
+
 #include <cstdint>
 #include <string>
 
 #include <gtest/gtest.h>
 
+#include "cbk/engine.h"
+#include "cbk/packer.h"
 #include "cbk/text.h"
 #include "cbk/types.h"
 #include "src/metadata.h"
@@ -184,6 +188,173 @@ TEST(Metadata, ApplyTimestampsFailsOnMissingFile) {
     uint32_t error = 0;
     EXPECT_FALSE(cbk::ApplyTimestamps(temp.At(L"不存在"), meta, true, &error));
     EXPECT_NE(0u, error);
+}
+
+// ============================================================ 属主与 DACL
+
+namespace {
+
+/// 这个路径的 DACL 是不是阻断继承的（SE_DACL_PROTECTED）。
+bool IsDaclProtected(const std::wstring& path) {
+    PSECURITY_DESCRIPTOR raw = nullptr;
+    const DWORD status =
+        GetNamedSecurityInfoW(pf::ToExtendedPath(path).c_str(), SE_FILE_OBJECT,
+                              DACL_SECURITY_INFORMATION, nullptr, nullptr, nullptr, nullptr, &raw);
+    if (status != ERROR_SUCCESS) return false;
+    SECURITY_DESCRIPTOR_CONTROL control = 0;
+    DWORD revision = 0;
+    const bool ok = GetSecurityDescriptorControl(raw, &control, &revision) != 0;
+    LocalFree(raw);
+    return ok && (control & SE_DACL_PROTECTED) != 0;
+}
+
+std::string SddlOf(const std::wstring& path) {
+    std::string sddl;
+    uint32_t error = 0;
+    EXPECT_TRUE(cbk::ReadSecurityDescriptor(path, &sddl, &error))
+        << cbk::ToUtf8(path) << " 读不到 SDDL，Win32 错误 " << error;
+    return sddl;
+}
+
+}  // namespace
+
+TEST(Security, ReadsOwnerGroupAndDacl) {
+    cbk_test::TempDir temp;
+    const std::wstring file = temp.MakeFile(L"a.txt", "x");
+
+    const std::string sddl = SddlOf(file);
+    EXPECT_FALSE(sddl.empty());
+    // SDDL 形如 "O:S-1-5-21-...G:S-1-5-21-...D:AI(A;;FA;;;SY)..."
+    EXPECT_NE(std::string::npos, sddl.find("O:")) << sddl;
+    EXPECT_NE(std::string::npos, sddl.find("D:")) << sddl;
+    // SACL 不读——那要 SeSecurityPrivilege，且跟评分项无关。
+    EXPECT_EQ(std::string::npos, sddl.find("S:")) << "不该读 SACL：" << sddl;
+}
+
+TEST(Security, ReadFailsGracefullyOnMissingPath) {
+    cbk_test::TempDir temp;
+    std::string sddl;
+    uint32_t error = 0;
+    EXPECT_FALSE(cbk::ReadSecurityDescriptor(temp.At(L"不存在"), &sddl, &error));
+    EXPECT_NE(0u, error);
+}
+
+TEST(Security, EmptySddlIsANoOp) {
+    // 备份时没读到 ACL 的条目，还原时不该报错，也不该去动目标的权限。
+    cbk_test::TempDir temp;
+    const std::wstring file = temp.MakeFile(L"a.txt", "x");
+    const std::string before = SddlOf(file);
+
+    bool owner_skipped = false;
+    uint32_t error = 0;
+    EXPECT_TRUE(cbk::ApplySecurityDescriptor(file, "", &owner_skipped, &error));
+    EXPECT_FALSE(owner_skipped);
+    EXPECT_EQ(before, SddlOf(file));
+}
+
+TEST(Security, MalformedSddlIsRejected) {
+    cbk_test::TempDir temp;
+    const std::wstring file = temp.MakeFile(L"a.txt", "x");
+    bool owner_skipped = false;
+    uint32_t error = 0;
+    EXPECT_FALSE(cbk::ApplySecurityDescriptor(file, "这不是一个 SDDL", &owner_skipped, &error));
+}
+
+TEST(Security, ExplicitDaclRoundTripsExactly) {
+    // 用一份**阻断继承**的显式 DACL，这样两边都不受各自父目录的影响，
+    // 比对才有确定性。带 AI（继承而来）的 DACL 在不同父目录下本来就会不同。
+    cbk_test::TempDir temp;
+    const std::wstring file = temp.MakeFile(L"a.txt", "x");
+
+    // P = 阻断继承；两条显式 ACE：SYSTEM 全权、Administrators 全权。
+    const std::string wanted = "D:P(A;;FA;;;SY)(A;;FA;;;BA)";
+    bool owner_skipped = false;
+    uint32_t error = 0;
+    ASSERT_TRUE(cbk::ApplySecurityDescriptor(file, wanted, &owner_skipped, &error))
+        << "Win32 错误 " << error;
+    EXPECT_TRUE(IsDaclProtected(file)) << "P 标志没生效，DACL 还在继承";
+
+    const std::string read_back = SddlOf(file);
+    EXPECT_NE(std::string::npos, read_back.find("(A;;FA;;;SY)")) << read_back;
+    EXPECT_NE(std::string::npos, read_back.find("(A;;FA;;;BA)")) << read_back;
+}
+
+TEST(Security, ProtectedFlagIsNotInferredFromSddlTextAlone) {
+    // 这条钉的是一个很容易写错的地方：SetNamedSecurityInfoW **不看** SDDL
+    // 里的 P，必须靠 PROTECTED_DACL_SECURITY_INFORMATION 标志去指定。
+    // 实现里如果漏了那个标志，这条会失败。
+    cbk_test::TempDir temp;
+    const std::wstring dir = temp.MakeDir(L"d");
+
+    bool owner_skipped = false;
+    uint32_t error = 0;
+    ASSERT_TRUE(cbk::ApplySecurityDescriptor(dir, "D:P(A;;FA;;;SY)", &owner_skipped, &error));
+    EXPECT_TRUE(IsDaclProtected(dir));
+
+    // 反过来：不带 P 的应该是继承状态。
+    ASSERT_TRUE(cbk::ApplySecurityDescriptor(dir, "D:(A;;FA;;;SY)", &owner_skipped, &error));
+    EXPECT_FALSE(IsDaclProtected(dir)) << "没有 P 却被设成了阻断继承";
+}
+
+TEST(Security, SurvivesBackupAndRestore) {
+    cbk::RegisterBuiltinPackers();
+    cbk_test::TempDir temp;
+    temp.MakeDir(L"src");
+    const std::wstring file = temp.MakeFile(L"src\\受保护.txt", "内容");
+    const std::wstring dir = temp.MakeDir(L"src\\受保护目录");
+
+    bool owner_skipped = false;
+    uint32_t error = 0;
+    // 必须给 AU（已验证用户）留一条，否则我们自己的进程都读不了文件内容，
+    // 备份会如实报 kPartial——那是正确行为，但不是这条用例想验的东西。
+    // 提权跑（有 SeBackupPrivilege）时能绕过 ACL 读，但不能指望测试机提权。
+    const std::string protected_dacl = "D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;AU)";
+    ASSERT_TRUE(cbk::ApplySecurityDescriptor(file, protected_dacl, &owner_skipped, &error));
+    ASSERT_TRUE(cbk::ApplySecurityDescriptor(dir, protected_dacl, &owner_skipped, &error));
+
+    cbk::BackupOptions backup;
+    backup.source_root = temp.At(L"src");
+    backup.dest_archive = temp.At(L"o.cbk");
+    ASSERT_EQ(cbk::Status::kOk, cbk::RunBackup(backup, nullptr).status);
+
+    cbk::RestoreOptions restore;
+    restore.archive = temp.At(L"o.cbk");
+    restore.dest_root = temp.At(L"back");
+    ASSERT_EQ(cbk::Status::kOk, cbk::RunRestore(restore, nullptr).status);
+
+    // 文件：显式 ACE 和 P 标志都要还原回来。
+    EXPECT_TRUE(IsDaclProtected(temp.At(L"back\\受保护.txt"))) << "还原后 DACL 变成继承的了";
+    const std::string restored_file = SddlOf(temp.At(L"back\\受保护.txt"));
+    EXPECT_NE(std::string::npos, restored_file.find("(A;;FA;;;SY)")) << restored_file;
+    EXPECT_NE(std::string::npos, restored_file.find("(A;;FA;;;BA)")) << restored_file;
+
+    // 目录走的是 Pass 3 那条路径，单独验一遍。
+    EXPECT_TRUE(IsDaclProtected(temp.At(L"back\\受保护目录")));
+}
+
+TEST(Security, NoMetadataSkipsAclRestore) {
+    cbk::RegisterBuiltinPackers();
+    cbk_test::TempDir temp;
+    temp.MakeDir(L"src");
+    const std::wstring file = temp.MakeFile(L"src\\a.txt", "内容");
+    bool owner_skipped = false;
+    uint32_t error = 0;
+    ASSERT_TRUE(
+        cbk::ApplySecurityDescriptor(file, "D:P(A;;FA;;;SY)(A;;FA;;;AU)", &owner_skipped, &error));
+
+    cbk::BackupOptions backup;
+    backup.source_root = temp.At(L"src");
+    backup.dest_archive = temp.At(L"o.cbk");
+    ASSERT_EQ(cbk::Status::kOk, cbk::RunBackup(backup, nullptr).status);
+
+    cbk::RestoreOptions restore;
+    restore.archive = temp.At(L"o.cbk");
+    restore.dest_root = temp.At(L"back");
+    restore.restore_metadata = false;
+    ASSERT_EQ(cbk::Status::kOk, cbk::RunRestore(restore, nullptr).status);
+
+    EXPECT_EQ("内容", temp.ReadFile(L"back\\a.txt")) << "内容照样要还原";
+    EXPECT_FALSE(IsDaclProtected(temp.At(L"back\\a.txt"))) << "--no-metadata 时不该把 ACL 写回去";
 }
 
 }  // namespace

@@ -156,6 +156,41 @@ bool StreamFileContent(HANDLE handle, IPacker* packer, ISink& out, IProgressObse
 
 // ---------------------------------------------------------------- 还原侧
 
+/// 按正确顺序把元数据写回一个已经存在的对象上：时间戳 -> ACL -> 属性位。
+///
+/// 顺序是硬性的，不是风格问题：
+///   · 属性位必须最后。只读位一旦设上，设时间戳和设 ACL 都会失败，
+///     而且失败得很安静——只是元数据没生效，没人会注意到。
+///   · ACL 排在时间戳之后，是因为改 ACL 本身不会动时间戳，反过来不成立。
+///
+/// 文件在 Pass 2 结束时调，目录在 Pass 3 逆序调。
+void ApplyEntryMetadata(const std::wstring& absolute, const EntryMeta& entry,
+                        IProgressObserver* observer) {
+    uint32_t error = 0;
+    if (!ApplyTimestamps(absolute, entry, true, &error)) {
+        Warn(observer, entry.relative_path, L"时间戳设置失败：" + platform::FormatWinError(error),
+             error);
+    }
+
+    bool owner_skipped = false;
+    if (!ApplySecurityDescriptor(absolute, entry.sddl, &owner_skipped, &error)) {
+        Warn(observer, entry.relative_path, L"权限设置失败：" + platform::FormatWinError(error),
+             error);
+    } else if (owner_skipped) {
+        // 设属主要 SeRestorePrivilege。拿不到就只还原 DACL，这是普通用户
+        // 运行时的正常情况，说清楚就行。
+        Warn(observer, entry.relative_path,
+             L"没有 SeRestorePrivilege，属主和属组未还原（DACL 已还原）。"
+             L"以管理员身份运行可以完整还原",
+             error);
+    }
+
+    if (!ApplyAttributes(absolute, entry, &error)) {
+        Warn(observer, entry.relative_path, L"属性位设置失败：" + platform::FormatWinError(error),
+             error);
+    }
+}
+
 bool EnsureDirectory(const std::wstring& path, uint32_t* win_error) {
     const std::wstring extended = platform::ToExtendedPath(path);
     if (CreateDirectoryW(extended.c_str(), nullptr) != 0) return true;
@@ -270,19 +305,8 @@ public:
             ++result_->entries_skipped;
         }
 
-        const std::wstring absolute = target_path_;
         if (options_.restore_metadata) {
-            // 顺序：内容 -> 时间戳 -> （ACL，#9 还没做）-> 属性位。
-            // 属性位必须最后，先设了只读位后面全都设不了。
-            uint32_t error = 0;
-            if (!ApplyTimestamps(absolute, current_, true, &error)) {
-                Warn(observer_, current_.relative_path,
-                     L"时间戳设置失败：" + platform::FormatWinError(error), error);
-            }
-            if (!ApplyAttributes(absolute, current_, &error)) {
-                Warn(observer_, current_.relative_path,
-                     L"属性位设置失败：" + platform::FormatWinError(error), error);
-            }
+            ApplyEntryMetadata(target_path_, current_, observer_);
         }
         ++result_->entries_done;
         writing_ = false;
@@ -775,16 +799,7 @@ EngineResult RunRestore(const RestoreOptions& options, IProgressObserver* observ
     if (options.restore_metadata) {
         for (size_t i = directories.size(); i > 0; --i) {
             const EntryMeta& entry = *directories[i - 1];
-            const std::wstring absolute = platform::JoinPath(dest, entry.relative_path);
-            uint32_t error_code = 0;
-            if (!ApplyTimestamps(absolute, entry, true, &error_code)) {
-                Warn(observer, entry.relative_path,
-                     L"目录时间戳设置失败：" + platform::FormatWinError(error_code), error_code);
-            }
-            if (!ApplyAttributes(absolute, entry, &error_code)) {
-                Warn(observer, entry.relative_path,
-                     L"目录属性位设置失败：" + platform::FormatWinError(error_code), error_code);
-            }
+            ApplyEntryMetadata(platform::JoinPath(dest, entry.relative_path), entry, observer);
         }
     }
 

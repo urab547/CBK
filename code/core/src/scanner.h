@@ -48,10 +48,10 @@ struct ScanStats {
 ///     original_size / reparse_tag
 ///
 ///     link_target / link_is_relative（重解析点的目标）
+///     sddl（属主、属组、DACL）
 ///
-/// 不填，留给后面的模块：
-///   · hardlink_ref_id —— 硬链接去重在备份引擎里做，那儿本来就要开句柄
-///   · sddl —— 属主与 DACL（#9）
+/// 不填：hardlink_ref_id —— 硬链接去重在备份引擎里做，判断链接数要开句柄，
+/// 而引擎读内容时本来就要开，放那儿不额外花系统调用。
 ///
 /// ## 顺序保证
 ///

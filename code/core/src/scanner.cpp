@@ -269,6 +269,18 @@ Status Scanner::Scan(const EntryCallback& on_entry, ScanStats* stats) {
                 MaterializeFollowedLink(absolute, &meta, &local);
             }
 
+            // 属主与 DACL。放在最后读，因为它跟类型判定无关，而且是这一圈里
+            // 最贵的一次系统调用——前面任何一步把这条判成不用备份，都不用
+            // 白花这个开销。
+            uint32_t sddl_error = 0;
+            if (!ReadSecurityDescriptor(absolute, &meta.sddl, &sddl_error)) {
+                meta.sddl.clear();
+                Warn(meta.relative_path,
+                     L"读不到属主与权限，这一条的 ACL 不会被备份：" +
+                         platform::FormatWinError(sddl_error),
+                     sddl_error);
+            }
+
             if (meta.type == FileType::kUnsupported) {
                 Warn(meta.relative_path,
                      L"无法识别的重解析点（标签 " + ToHex(meta.reparse_tag) + L"），只记录不还原",
