@@ -58,8 +58,8 @@ const char* ToString(FileType type);
 /// 中途转来转去只会丢字符。
 struct EntryMeta {
     // —— 标识 ——
-    uint64_t id = 0;              ///< 条目序号，从 0 开始递增
-    std::wstring relative_path;   ///< 相对源根的路径，'\\' 分隔，不以分隔符开头
+    uint64_t id = 0;             ///< 条目序号，从 0 开始递增
+    std::wstring relative_path;  ///< 相对源根的路径，'\\' 分隔，不以分隔符开头
     FileType type = FileType::kRegular;
 
     // —— 元数据（对应评分项"属主/时间/权限"）——
@@ -76,10 +76,10 @@ struct EntryMeta {
     uint32_t crc32 = 0;          ///< 原始内容的 CRC32，用于 verify
 
     // —— 类型相关 ——
-    std::wstring link_target;   ///< 符号链接/junction 的原始目标（可能是相对路径）
+    std::wstring link_target;       ///< 符号链接/junction 的原始目标（可能是相对路径）
     bool link_is_relative = false;  ///< 符号链接是否带 SYMLINK_FLAG_RELATIVE
-    uint32_t reparse_tag = 0;   ///< 重解析点标签，kUnsupported 时用于诊断
-    uint64_t hardlink_ref_id = 0;  ///< kHardlinkRef 指向的条目 id
+    uint32_t reparse_tag = 0;       ///< 重解析点标签，kUnsupported 时用于诊断
+    uint64_t hardlink_ref_id = 0;   ///< kHardlinkRef 指向的条目 id
 };
 
 // ============================================================================

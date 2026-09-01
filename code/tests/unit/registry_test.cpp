@@ -32,8 +32,7 @@ private:
 
 class FakeStageFactory : public cbk::IStageFactory {
 public:
-    FakeStageFactory(std::string name, cbk::StageKind kind)
-        : name_(std::move(name)), kind_(kind) {}
+    FakeStageFactory(std::string name, cbk::StageKind kind) : name_(std::move(name)), kind_(kind) {}
     std::string Name() const override { return name_; }
     cbk::StageKind Kind() const override { return kind_; }
     std::unique_ptr<cbk::IStage> CreateForward() override {
@@ -52,23 +51,23 @@ private:
 void EnsureFakesRegistered() {
     cbk::StageRegistry& registry = cbk::StageRegistry::Instance();
     if (!registry.Has("fake-compress")) {
-        registry.Register(std::make_unique<FakeStageFactory>(
-            "fake-compress", cbk::StageKind::kCompress));
+        registry.Register(
+            std::make_unique<FakeStageFactory>("fake-compress", cbk::StageKind::kCompress));
     }
     if (!registry.Has("fake-encrypt")) {
-        registry.Register(std::make_unique<FakeStageFactory>(
-            "fake-encrypt", cbk::StageKind::kEncrypt));
+        registry.Register(
+            std::make_unique<FakeStageFactory>("fake-encrypt", cbk::StageKind::kEncrypt));
     }
 }
 
 TEST(Types, FileTypeToStringCoversEveryValue) {
-    EXPECT_STREQ("regular",      cbk::ToString(cbk::FileType::kRegular));
-    EXPECT_STREQ("directory",    cbk::ToString(cbk::FileType::kDirectory));
+    EXPECT_STREQ("regular", cbk::ToString(cbk::FileType::kRegular));
+    EXPECT_STREQ("directory", cbk::ToString(cbk::FileType::kDirectory));
     EXPECT_STREQ("symlink-file", cbk::ToString(cbk::FileType::kSymlinkFile));
-    EXPECT_STREQ("symlink-dir",  cbk::ToString(cbk::FileType::kSymlinkDir));
-    EXPECT_STREQ("junction",     cbk::ToString(cbk::FileType::kJunction));
+    EXPECT_STREQ("symlink-dir", cbk::ToString(cbk::FileType::kSymlinkDir));
+    EXPECT_STREQ("junction", cbk::ToString(cbk::FileType::kJunction));
     EXPECT_STREQ("hardlink-ref", cbk::ToString(cbk::FileType::kHardlinkRef));
-    EXPECT_STREQ("unsupported",  cbk::ToString(cbk::FileType::kUnsupported));
+    EXPECT_STREQ("unsupported", cbk::ToString(cbk::FileType::kUnsupported));
 }
 
 TEST(Types, FormatConstantsAreFrozen) {
