@@ -15,6 +15,7 @@ add_library(cbk_core STATIC
     src/entry_codec.cpp
     src/archive.cpp
     src/packers/native_packer.cpp
+    src/reparse.cpp
     src/scanner.cpp
     src/stage_pipeline.cpp
     src/text.cpp

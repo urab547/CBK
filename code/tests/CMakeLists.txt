@@ -37,6 +37,7 @@ add_executable(cbk_tests
     unit/scanner_test.cpp
     unit/metadata_test.cpp
     unit/engine_test.cpp
+    unit/filetype_test.cpp
 
     # 新增测试文件加在下面：
     # unit/stage_roundtrip_test.cpp    # 队友 A/B：随机字节正变换再逆变换
