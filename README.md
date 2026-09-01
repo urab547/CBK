@@ -94,10 +94,18 @@ scripts/            格式化、注释率统计
 
 - 必须走 Pull Request
 - 两个 CI 检查（`构建与测试 (Windows)`、`代码规范检查`）都得绿
-- 至少 1 人 Approve
+- **不强制要求 Approve**（见下）
 - 分支要先跟 `main` 同步
 - PR 上的评论要解决完
 - 禁止强推、禁止删分支
+
+**为什么不强制 Approve。** GitHub 不允许给自己的 PR 点 Approve，这是平台
+硬规则、没有开关能改。三个人的小组里，强制"至少 1 人批准"的结果是每个人
+都得等另外两个人有空，而绝大多数 PR 其实只要 CI 绿就够了。所以把必需的
+批准数设成了 0：**CI 绿就能合**。
+
+这不等于不用 review。改到别人模块的接口、改容器格式、改 `include/cbk/`
+下的契约，仍然要拉一个人看过再合——只是靠约定，不靠机器卡着。
 
 ### 一轮完整流程
 
@@ -114,7 +122,7 @@ git push -u origin feat/pack-tar
 gh pr create --fill --base main
 ```
 
-PR 开出来后 CI 自动跑，另外两人点 Approve，然后：
+PR 开出来后 CI 自动跑，两个检查都绿了就能合：
 
 ```powershell
 gh pr merge --squash --delete-branch
