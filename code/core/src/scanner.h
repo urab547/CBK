@@ -21,6 +21,7 @@
 
 #include "cbk/event.h"
 #include "cbk/types.h"
+#include "src/reparse.h"
 
 namespace cbk {
 
@@ -46,9 +47,10 @@ struct ScanStats {
 /// 填：id / relative_path / type / attributes / 三个时间戳 /
 ///     original_size / reparse_tag
 ///
+///     link_target / link_is_relative（重解析点的目标）
+///
 /// 不填，留给后面的模块：
-///   · link_target 与 link_is_relative —— 符号链接与 junction 的目标（#6）
-///   · hardlink_ref_id —— 硬链接去重（#7）
+///   · hardlink_ref_id —— 硬链接去重在备份引擎里做，那儿本来就要开句柄
 ///   · sddl —— 属主与 DACL（#9）
 ///
 /// ## 顺序保证
@@ -78,6 +80,9 @@ private:
     };
 
     void Warn(const std::wstring& relative, const std::wstring& message, uint32_t win_error);
+
+    /// 跟随模式下，把一条链接改记成它指向的东西（目录或普通文件）。
+    void MaterializeFollowedLink(const std::wstring& absolute, EntryMeta* meta, ScanStats* stats);
 
     std::wstring root_;
     ScanOptions options_;

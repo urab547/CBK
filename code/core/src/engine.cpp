@@ -16,6 +16,7 @@
 #include "src/crc32.h"
 #include "src/metadata.h"
 #include "src/platform_win.h"
+#include "src/reparse.h"
 #include "src/scanner.h"
 #include "src/stage_pipeline.h"
 
@@ -46,6 +47,20 @@ public:
 private:
     ISink* downstream_;
     uint64_t count_ = 0;
+};
+
+/// 硬链接的身份。同一个文件实体的多个目录项，这三个值完全相同。
+///
+/// 来自 GetFileInformationByHandle。硬链接不能跨卷，所以卷序列号也必须
+/// 进键——两个不同卷上的文件完全可能撞上同一个文件索引。
+struct HardlinkKey {
+    uint32_t volume_serial = 0;
+    uint64_t file_index = 0;
+
+    bool operator<(const HardlinkKey& other) const {
+        if (volume_serial != other.volume_serial) return volume_serial < other.volume_serial;
+        return file_index < other.file_index;
+    }
 };
 
 void Warn(IProgressObserver* observer, const std::wstring& path, const std::wstring& message,
@@ -206,11 +221,9 @@ public:
                 ++result_->entries_done;
                 break;
             case FileType::kSymlinkFile:
-            case FileType::kSymlinkDir:
-            case FileType::kJunction:
-                Skip(L"符号链接与 junction 的还原尚未实现（见 issue #6）");
-                break;
-            case FileType::kHardlinkRef: Skip(L"硬链接的还原尚未实现（见 issue #7）"); break;
+            case FileType::kSymlinkDir: RestoreSymlink(); break;
+            case FileType::kJunction: RestoreJunction(); break;
+            case FileType::kHardlinkRef: RestoreHardlink(); break;
             case FileType::kUnsupported: Skip(L"备份时就没能识别的重解析点，不还原"); break;
         }
     }
@@ -286,12 +299,19 @@ private:
         ++result_->entries_skipped;
     }
 
-    void OpenRegularFile() {
+    /// 算出目标路径、按 --overwrite 策略处理已存在的情况、兜底建父目录。
+    ///
+    /// 文件、符号链接、junction、硬链接四条路径都要走这一遍，所以抽出来。
+    ///
+    /// @return false 表示这条按策略跳过了（已经计过数、发过 warn）。
+    bool PrepareTargetPath() {
         target_path_ = platform::JoinPath(options_.dest_root, current_.relative_path);
 
         if (PathExists(target_path_)) {
             switch (options_.overwrite) {
-                case OverwritePolicy::kSkip: Skip(L"目标已存在，按 --overwrite skip 跳过"); return;
+                case OverwritePolicy::kSkip:
+                    Skip(L"目标已存在，按 --overwrite skip 跳过");
+                    return false;
                 case OverwritePolicy::kRename: target_path_ = FindFreeName(target_path_); break;
                 case OverwritePolicy::kForce:
                     // 只读文件直接覆盖会失败，先把只读位摘掉。
@@ -308,6 +328,11 @@ private:
             // 免得一条目录条目缺失就让它下面所有文件全丢。
             EnsureDirectory(target_path_.substr(0, slash), &error);
         }
+        return true;
+    }
+
+    void OpenRegularFile() {
+        if (!PrepareTargetPath()) return;
 
         handle_ = platform::CreateForWrite(target_path_);
         if (!handle_.IsValid()) {
@@ -317,6 +342,100 @@ private:
             return;
         }
         writing_ = true;
+    }
+
+    void RestoreSymlink() {
+        if (!PrepareTargetPath()) return;
+        if (current_.link_target.empty()) {
+            Skip(L"符号链接没有记录目标，跳过");
+            return;
+        }
+
+        const bool directory = current_.type == FileType::kSymlinkDir;
+        uint32_t error = 0;
+        if (CreateSymlink(target_path_, current_.link_target, directory, &error)) {
+            ++result_->entries_done;
+            return;
+        }
+
+        // 建不了通常是既非管理员、又没开开发者模式。降级：目录链接建成空目录、
+        // 文件链接建成 0 字节文件，让目录结构至少是完整的，然后 warn 说明。
+        // 不能因为一条链接建不出来就中断整个还原。
+        uint32_t degrade_error = 0;
+        bool degraded = false;
+        if (directory) {
+            degraded = EnsureDirectory(target_path_, &degrade_error);
+        } else {
+            platform::ScopedHandle placeholder = platform::CreateForWrite(target_path_);
+            degraded = placeholder.IsValid();
+        }
+        Warn(observer_, current_.relative_path,
+             L"建符号链接失败（" + platform::FormatWinError(error) +
+                 L"）。已降级为空占位，需要管理员权限或打开开发者模式才能完整还原",
+             error);
+        ++result_->entries_skipped;
+        if (!degraded) {
+            Warn(observer_, current_.relative_path, L"连占位都建不出来", degrade_error);
+        }
+    }
+
+    void RestoreJunction() {
+        if (!PrepareTargetPath()) return;
+        if (current_.link_target.empty()) {
+            Skip(L"junction 没有记录目标，跳过");
+            return;
+        }
+
+        // junction 不需要管理员权限也不需要开发者模式，这条路径基本不会失败。
+        uint32_t error = 0;
+        if (CreateJunction(target_path_, current_.link_target, &error)) {
+            ++result_->entries_done;
+            return;
+        }
+        Warn(observer_, current_.relative_path,
+             L"建 junction 失败：" + platform::FormatWinError(error), error);
+        ++result_->entries_skipped;
+    }
+
+    void RestoreHardlink() {
+        if (index_ == nullptr) {
+            Skip(L"没有索引，找不到硬链接指向的条目");
+            return;
+        }
+        const auto it = index_->find(current_.hardlink_ref_id);
+        if (it == index_->end()) {
+            Skip(L"硬链接指向的条目不在索引里，包可能已损坏");
+            return;
+        }
+        // 按 id 升序还原保证了被指向的那条一定已经落盘：
+        // hardlink_ref_id 一定小于当前条目的 id。
+        const std::wstring existing =
+            platform::JoinPath(options_.dest_root, it->second->relative_path);
+
+        if (!PrepareTargetPath()) return;
+
+        if (CreateHardLinkW(platform::ToExtendedPath(target_path_).c_str(),
+                            platform::ToExtendedPath(existing).c_str(), nullptr) != 0) {
+            ++result_->entries_done;
+            return;
+        }
+
+        // 硬链接不能跨卷。还原目标和被指向的条目落在不同卷上时只能降级成复制：
+        // 内容是对的，但两个路径不再是同一个文件实体了——必须说清楚。
+        const uint32_t error = GetLastError();
+        if (CopyFileW(platform::ToExtendedPath(existing).c_str(),
+                      platform::ToExtendedPath(target_path_).c_str(), FALSE) != 0) {
+            Warn(observer_, current_.relative_path,
+                 L"建硬链接失败（" + platform::FormatWinError(error) +
+                     L"），已降级为复制一份。内容一致，但不再是同一个文件实体",
+                 error);
+            ++result_->entries_done;
+            return;
+        }
+        Warn(observer_, current_.relative_path,
+             L"硬链接建不了、复制也失败：" + platform::FormatWinError(GetLastError()),
+             GetLastError());
+        ++result_->entries_skipped;
     }
 
     const RestoreOptions& options_;
@@ -402,6 +521,10 @@ EngineResult RunBackup(const BackupOptions& options, IProgressObserver* observer
     written.reserve(entries.size());
     uint64_t total_original = 0;
 
+    // 硬链接去重表。**只对 nNumberOfLinks > 1 的文件建表项**——几万个普通
+    // 文件全塞进去纯属浪费，而链接数是开句柄时顺手就有的，不额外花系统调用。
+    std::map<HardlinkKey, uint64_t> hardlinks;
+
     try {
         // ---- 数据区 ----
         std::vector<std::unique_ptr<IStage>> stages;
@@ -443,6 +566,39 @@ EngineResult RunBackup(const BackupOptions& options, IProgressObserver* observer
                 // 句柄已经在手上，这一步不额外开销一次 CreateFile。
                 ReadMetadataFromHandle(handle.Get(), &entry);
 
+                // ---- 硬链接去重 ----
+                //
+                // 同一份内容有多个目录项时，只有第一次遇到的那条存内容，
+                // 后面的都记成 kHardlinkRef 指回去。这既省空间，也是"正确
+                // 处理硬链接"这个评分点的核心——把 3 个硬链接当成 3 个独立
+                // 文件存下来的话，还原之后它们就不再是同一个实体了。
+                BY_HANDLE_FILE_INFORMATION info = {};
+                HardlinkKey key;
+                bool multi_linked = false;
+                if (GetFileInformationByHandle(handle.Get(), &info) != 0 &&
+                    info.nNumberOfLinks > 1) {
+                    multi_linked = true;
+                    key.volume_serial = info.dwVolumeSerialNumber;
+                    key.file_index =
+                        (static_cast<uint64_t>(info.nFileIndexHigh) << 32) | info.nFileIndexLow;
+
+                    const auto found = hardlinks.find(key);
+                    if (found != hardlinks.end()) {
+                        entry.type = FileType::kHardlinkRef;
+                        entry.hardlink_ref_id = found->second;
+                        entry.original_size = 0;
+                        entry.crc32 = 0;
+                        handle.Reset();
+
+                        packer->BeginEntry(entry, counter);
+                        packer->EndEntry(counter);
+                        entry.stored_size = counter.Count() - entry.data_offset;
+                        written.push_back(entry);
+                        ++result.entries_done;
+                        continue;
+                    }
+                }
+
                 packer->BeginEntry(entry, counter);
                 uint64_t actual = 0;
                 uint32_t crc = 0;
@@ -462,6 +618,10 @@ EngineResult RunBackup(const BackupOptions& options, IProgressObserver* observer
                 entry.crc32 = crc;
                 result.bytes_read += actual;
                 total_original += actual;
+
+                // 登记放在写成功之后：万一上面读失败被 continue 掉了，
+                // 后面的硬链接就会指向一条根本不在索引里的 id。
+                if (multi_linked) hardlinks.emplace(key, entry.id);
             } else {
                 packer->BeginEntry(entry, counter);
                 packer->EndEntry(counter);

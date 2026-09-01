@@ -8,6 +8,7 @@
 
 #include "src/metadata.h"
 #include "src/platform_win.h"
+#include "src/reparse.h"
 
 namespace cbk {
 
@@ -68,6 +69,18 @@ FileType ClassifyEntry(const WIN32_FIND_DATAW& find_data, uint32_t* reparse_tag)
     return FileType::kRegular;
 }
 
+/// 是不是重解析点类型（含识别不出来的那些）。
+bool IsReparse(FileType type) {
+    return type == FileType::kSymlinkFile || type == FileType::kSymlinkDir ||
+           type == FileType::kJunction || type == FileType::kUnsupported;
+}
+
+/// 是不是我们能完整还原的链接类型。
+bool IsLink(FileType type) {
+    return type == FileType::kSymlinkFile || type == FileType::kSymlinkDir ||
+           type == FileType::kJunction;
+}
+
 /// 跟随模式下用来断环的身份：同一个目录无论从哪条链接走到，
 /// (卷序列号, 文件索引) 都一样。
 struct FileIdentity {
@@ -91,6 +104,39 @@ bool QueryIdentity(const std::wstring& path, FileIdentity* out) {
 }
 
 }  // namespace
+
+void Scanner::MaterializeFollowedLink(const std::wstring& absolute, EntryMeta* meta,
+                                      ScanStats* stats) {
+    // 跟着链接走一次，拿目标的真实身份。打不开（悬空链接）就退回原样，
+    // 当成普通链接备份——总比整条丢掉强。
+    platform::ScopedHandle handle =
+        platform::OpenPath(absolute, FILE_READ_ATTRIBUTES, OPEN_EXISTING, /*no_follow=*/false);
+    if (!handle.IsValid()) {
+        Warn(meta->relative_path,
+             L"链接指向的目标打不开，按链接本身备份：" + platform::FormatWinError(GetLastError()),
+             GetLastError());
+        return;
+    }
+
+    BY_HANDLE_FILE_INFORMATION info = {};
+    if (GetFileInformationByHandle(handle.Get(), &info) == 0) return;
+
+    const bool target_is_directory = (info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+    meta->type = target_is_directory ? FileType::kDirectory : FileType::kRegular;
+    // 链接本身没有内容也没有属性可言了，现在记的是目标的。
+    meta->attributes = info.dwFileAttributes & ~static_cast<DWORD>(FILE_ATTRIBUTE_REPARSE_POINT);
+    meta->creation_time = ToUint64(info.ftCreationTime);
+    meta->last_access_time = ToUint64(info.ftLastAccessTime);
+    meta->last_write_time = ToUint64(info.ftLastWriteTime);
+    meta->link_target.clear();
+    meta->link_is_relative = false;
+    meta->reparse_tag = 0;
+
+    if (!target_is_directory) {
+        meta->original_size = ToUint64(info.nFileSizeHigh, info.nFileSizeLow);
+        stats->total_bytes += meta->original_size;
+    }
+}
 
 Scanner::Scanner(std::wstring root, ScanOptions options, IProgressObserver* observer)
     : root_(platform::NormalizePath(root)), options_(options), observer_(observer) {}
@@ -187,10 +233,40 @@ Status Scanner::Scan(const EntryCallback& on_entry, ScanStats* stats) {
             //
             // 普通文件不在这里补——引擎读内容时本来就要开句柄，在那儿顺手
             // 刷一次更划算，也更准（拿到的是读到的那份内容对应的时间）。
+            const std::wstring absolute = platform::JoinPath(root_, meta.relative_path);
             if (meta.type != FileType::kRegular) {
-                const std::wstring absolute = platform::JoinPath(root_, meta.relative_path);
                 // 读不到就沿用 find data 那份——陈旧的值也比没有值强。
                 ReadMetadataByPath(absolute, true, &meta);
+            }
+
+            // 重解析点：把它指向哪儿读出来。这一步不能省，否则还原时
+            // 只知道"这里有个链接"却不知道它指向谁。
+            if (IsReparse(meta.type)) {
+                ReparseInfo info;
+                uint32_t error = 0;
+                if (ReadReparsePoint(absolute, &info, &error)) {
+                    meta.link_target = info.target;
+                    meta.link_is_relative = info.is_relative;
+                    // 以重解析点数据里的判断为准：ClassifyEntry 只看了属性位
+                    // 和标签，这里读到的是真正的内容。
+                    meta.type = info.type;
+                    meta.reparse_tag = info.tag;
+                } else {
+                    Warn(
+                        meta.relative_path,
+                        L"读不出重解析点数据，降级为不支持类型：" + platform::FormatWinError(error),
+                        error);
+                    meta.type = FileType::kUnsupported;
+                }
+            }
+
+            // 跟随模式下，链接要按它指向的东西来记，而不是记成链接。
+            //
+            // 不这么做的话会得到一个自相矛盾的包：类型写着"这是个目录链接"，
+            // 底下却还挂着一堆子项。还原时先建出链接、再往链接里写子项，
+            // 等于把文件写进了链接指向的真实目录——直接污染源数据。
+            if (options_.follow_symlinks && IsLink(meta.type)) {
+                MaterializeFollowedLink(absolute, &meta, &local);
             }
 
             if (meta.type == FileType::kUnsupported) {
