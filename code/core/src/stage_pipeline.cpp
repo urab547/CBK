@@ -27,6 +27,11 @@ private:
     ISink* downstream_;
 };
 
+// 适配器只存裸指针，不持有 Stage 也不持有下游。
+//
+// 生命周期都由 StageChainSink 兜着：stages_ 在本对象里，terminal 由调用方
+// 保证活得更久（头文件里写明了这条约定）。适配器自己的析构什么都不做，
+// 所以它们之间的销毁顺序无所谓。
 StageChainSink::StageChainSink(std::vector<std::unique_ptr<IStage>> stages, ISink* terminal)
     : terminal_(terminal), stages_(std::move(stages)) {
     // 从链尾往链头搭：每一段的下游是它后面那一段，最后一段的下游是 terminal。
@@ -47,6 +52,8 @@ ISink& StageChainSink::Entry() {
 }
 
 void StageChainSink::Finish() {
+    // 幂等。析构和显式调用都可能走到这里，而 Stage 的 Finish 被调两次
+    // 通常会吐出两份尾部数据，直接把流写坏。
     if (finished_) return;
     finished_ = true;
     // 从链头往链尾。stage0 冲刷出来的尾部字节还要经过后面每一段。
@@ -95,6 +102,11 @@ bool StageChainSource::PumpOnce() {
     return false;
 }
 
+// 泵一次不一定拿得到数据：压缩器完全可能吞掉一整块只为攒够窗口。
+// 所以要循环泵，直到攒出字节、或者 PumpOnce 报告"再也不会有了"。
+//
+// 每轮开头清空 pending_ 而不是往后追加。不清的话缓冲会随着整个数据区
+// 一路涨大，"任何情况下不整个读进内存"这条硬要求就破了。
 size_t StageChainSource::Read(uint8_t* buf, size_t len) {
     if (len == 0) return 0;
 

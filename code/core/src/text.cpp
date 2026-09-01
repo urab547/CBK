@@ -21,6 +21,11 @@ std::string ToUtf8(const std::wstring& text) {
     return out;
 }
 
+// 转换失败（输入不是合法 UTF-8）时返回空串而不是抛异常。
+//
+// 这两个函数在容器解析路径上被大量调用，损坏的包里出现非法字节序列是
+// 完全可能的。返回空串让上层的字段校验去发现问题，比在最底层抛异常
+// 更好定位——异常从这里抛出去，栈上看不出是哪个条目的哪个字段坏了。
 std::wstring FromUtf8(const std::string& text) {
     if (text.empty()) return std::wstring();
 

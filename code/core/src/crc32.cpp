@@ -30,6 +30,10 @@ constexpr std::array<uint32_t, 256> kTable = MakeTable();
 
 }  // namespace
 
+// 把 state_ 拷进局部变量再循环。
+//
+// 成员变量每轮都要过一次 this 指针，编译器未必能证明循环里没人改它、
+// 因而不敢放进寄存器。几百 MB 的文件上这个差别是能测出来的。
 void Crc32::Update(const uint8_t* data, size_t len) {
     if (data == nullptr) return;
     uint32_t state = state_;

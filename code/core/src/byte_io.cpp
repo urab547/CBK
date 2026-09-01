@@ -12,6 +12,9 @@ void ByteWriter::WriteU8(uint8_t value) {
     out_->push_back(value);
 }
 
+// 每个宽度都手动逐字节拆，不用 memcpy 整个整数。
+// memcpy 写出去的是本机字节序，在小端机器上碰巧是对的，换到大端机器
+// 生成的包就读不了了。容器格式规定小端，就得显式按小端拼。
 void ByteWriter::WriteU16(uint16_t value) {
     out_->push_back(static_cast<uint8_t>(value & 0xFFu));
     out_->push_back(static_cast<uint8_t>((value >> 8) & 0xFFu));
@@ -35,6 +38,8 @@ void ByteWriter::WriteBytes(const void* data, size_t len) {
     out_->insert(out_->end(), bytes, bytes + len);
 }
 
+// 长度前缀而不是 NUL 结尾。路径转成 UTF-8 之后理论上不含 NUL，
+// 但格式的健壮性不该建立在"理论上"三个字上——长度前缀对内容零假设。
 void ByteWriter::WriteLengthPrefixed(const std::string& bytes) {
     WriteU32(static_cast<uint32_t>(bytes.size()));
     WriteBytes(bytes.data(), bytes.size());
@@ -46,6 +51,14 @@ void ByteWriter::WriteZeros(size_t count) {
 
 // ------------------------------------------------------------------ ByteReader
 
+// 边界检查的唯一入口。
+//
+// 两个要点：
+//   · 一旦置了错误位就永远返回 false，后续读取全部变成空操作。这样调用方
+//     可以连读十几个字段最后只查一次 IsOk()，不用每行都判断。
+//   · 用 len_ - offset_ 而不是 offset_ + need > len_。后者在 need 极大时
+//     会整数溢出绕回去，把越界读判成合法——而 need 恰恰来自文件里的
+//     长度字段，正是攻击者/损坏数据最容易做手脚的地方。
 bool ByteReader::Require(size_t need) {
     if (!ok_) return false;
     if (len_ - offset_ < need) {
