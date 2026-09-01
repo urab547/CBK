@@ -1,6 +1,8 @@
 // Copyright 2026 CBK Project. 元数据的读写。
 //
-// 目前覆盖属性位和三个时间戳。属主与 DACL（SDDL）是 #9，还没做。
+// 覆盖属性位、三个时间戳、属主与 DACL（SDDL 文本）。
+//
+// SACL（审计）不做：要 SeSecurityPrivilege 才读得到，且与评分项无关。
 #ifndef CODE_CORE_SRC_METADATA_H_
 #define CODE_CORE_SRC_METADATA_H_
 
@@ -40,6 +42,24 @@ bool ReadMetadataFromHandle(HANDLE handle, EntryMeta* meta);
 /// 陈旧的值也比没有值强。
 bool ReadMetadataByPath(const std::wstring& path, bool no_follow_reparse, EntryMeta* meta);
 
+/// 读出属主、属组和 DACL，序列化成 SDDL 文本。
+///
+/// ## 为什么存 SDDL 文本而不是二进制安全描述符
+///
+/// 文本可读、可 diff、写测试时能肉眼验证，答辩演示也拿得出手。
+/// ConvertSecurityDescriptorToStringSecurityDescriptorW 和它的逆函数是
+/// 无损互转的，所以不损失任何信息。体积代价可以忽略——典型 SDDL 两三百
+/// 字节，而且会被压缩掉。
+///
+/// ## 不读 SACL
+///
+/// SACL 是审计信息，要 SeSecurityPrivilege 才读得到，而且跟评分项无关。
+/// 只读 OWNER / GROUP / DACL 三段。
+///
+/// 读不到（没权限、文件系统不支持 ACL）时返回 false，调用方应当把 sddl
+/// 留空并继续——ACL 读不到不该让整个条目备份失败。
+bool ReadSecurityDescriptor(const std::wstring& path, std::string* sddl, uint32_t* win_error);
+
 // ============================================================================
 // 写
 // ============================================================================
@@ -77,6 +97,31 @@ bool ApplyTimestamps(const std::wstring& path, const EntryMeta& meta, bool no_fo
 ///
 /// @param win_error 失败时写入 GetLastError()，可为 nullptr。
 bool ApplyAttributes(const std::wstring& path, const EntryMeta& meta, uint32_t* win_error);
+
+/// 把 SDDL 文本写回成属主、属组和 DACL。
+///
+/// 顺序上必须排在设时间戳之后、设属性位之前——只读位一旦设上，
+/// 改 ACL 也会失败。
+///
+/// ## 三个绕不开的现实问题
+///
+/// **① 设置属主需要 SeRestorePrivilege。** 普通用户只能把属主设成自己或
+/// 自己所属的组。没有特权时整个 SetNamedSecurityInfoW 调用会失败——
+/// 连 DACL 也一起设不上。所以这里会**退一步只设 DACL 再试一次**，
+/// 并通过 owner_skipped 告诉调用方去发 warn。
+///
+/// **② 继承标志要显式控制。** SDDL 里的 `P` 表示这份 DACL 阻断继承、
+/// `AI` 表示是继承来的。但 SetNamedSecurityInfoW **不看 SDDL 里的 P**，
+/// 得靠 PROTECTED_DACL_SECURITY_INFORMATION / UNPROTECTED_... 这两个标志
+/// 来指定。不传的话还原出来的目录会莫名其妙继承目标位置的权限。
+///
+/// **③ SID 跨机器无意义。** `S-1-5-21-<机器标识>-1001` 这个账户在另一台
+/// 机器上不存在，还原过去会变成"无法解析的账户"。这不是 bug，是所有备份
+/// 软件的固有限制。本函数原样写入，解析不了的 ACE 由 Windows 自己保留。
+///
+/// @param owner_skipped 出参：因为没有特权而跳过了属主/属组时置 true。
+bool ApplySecurityDescriptor(const std::wstring& path, const std::string& sddl, bool* owner_skipped,
+                             uint32_t* win_error);
 
 }  // namespace cbk
 

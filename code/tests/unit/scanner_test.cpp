@@ -14,6 +14,7 @@
 #include <gtest/gtest.h>
 
 #include "cbk/event.h"
+#include "cbk/text.h"
 #include "cbk/types.h"
 #include "src/platform_win.h"
 #include "src/scanner.h"
@@ -178,17 +179,35 @@ TEST(Scanner, CapturesAttributesAndTimestamps) {
     EXPECT_GT(entry.creation_time, 0x01C0000000000000ull) << "看起来不像一个 FILETIME";
 }
 
-TEST(Scanner, LeavesFieldsForLaterModulesEmpty) {
-    // 明确记录当前的分工边界：这几个字段 Scanner 不填。
-    // link_target 由 #6 填、hardlink_ref_id 由 #7 填、sddl 由 #9 填。
+TEST(Scanner, FillsSecurityDescriptorForEveryEntry) {
+    // 普通文件在自己的临时目录里，读 ACL 不该失败。读到的 SDDL 至少要有
+    // 属主段（O:）和 DACL 段（D:）——空字符串意味着这一条的权限没被备份。
+    cbk_test::TempDir temp;
+    temp.MakeFile(L"plain.txt", "x");
+    temp.MakeDir(L"d");
+
+    const ScanResult result = RunScan(temp.Path());
+    ASSERT_EQ(2u, result.entries.size());
+    for (const cbk::EntryMeta& entry : result.entries) {
+        SCOPED_TRACE(cbk::ToUtf8(entry.relative_path));
+        EXPECT_FALSE(entry.sddl.empty()) << "这一条的权限没被备份";
+        EXPECT_NE(std::string::npos, entry.sddl.find("O:")) << "SDDL 里没有属主段";
+        EXPECT_NE(std::string::npos, entry.sddl.find("D:")) << "SDDL 里没有 DACL 段";
+    }
+}
+
+TEST(Scanner, LeavesHardlinkRefToTheBackupEngine) {
+    // 剩下的唯一一个 Scanner 不填的字段。判断一个文件有没有多个目录项要看
+    // nNumberOfLinks，那得开句柄；引擎读内容时本来就要开，放那儿做不额外
+    // 花系统调用。
     cbk_test::TempDir temp;
     temp.MakeFile(L"plain.txt", "x");
 
     const ScanResult result = RunScan(temp.Path());
     ASSERT_EQ(1u, result.entries.size());
-    EXPECT_TRUE(result.entries[0].sddl.empty());
-    EXPECT_TRUE(result.entries[0].link_target.empty());
+    EXPECT_EQ(cbk::FileType::kRegular, result.entries[0].type);
     EXPECT_EQ(0u, result.entries[0].hardlink_ref_id);
+    EXPECT_TRUE(result.entries[0].link_target.empty()) << "普通文件不该有链接目标";
 }
 
 // ============================================================ 名字与深度
