@@ -13,10 +13,11 @@
 
 #include "cbk/packer.h"
 #include "cbk/stage.h"
+#include "src/packers/native_packer.h"
 
 // 新增打包算法时在这里加 include：
-// #include "packers/tar_packer.h"      // 队友 A
-// #include "packers/cpio_packer.h"     // 队友 A
+// #include "src/packers/tar_packer.h"      // 队友 A
+// #include "src/packers/cpio_packer.h"     // 队友 A
 
 // 新增 Stage 时在这里加 include：
 // #include "stages/huffman_stage.h"    // 队友 A
@@ -28,9 +29,8 @@ namespace cbk {
 
 void RegisterBuiltinPackers() {
     PackerRegistry& registry = PackerRegistry::Instance();
-    (void)registry;  // 还没有实现时先占位，加了第一个算法就删掉这行
 
-    // registry.Register("cbk-native", [] { return std::make_unique<NativePacker>(); });
+    registry.Register(kNativePackerName, [] { return std::make_unique<NativePacker>(); });
     // registry.Register("tar",  [] { return std::make_unique<TarPacker>(); });
     // registry.Register("cpio", [] { return std::make_unique<CpioPacker>(); });
 }
