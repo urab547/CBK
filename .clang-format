@@ -1,4 +1,4 @@
-# 基于 Google 风格，改两处：缩进 4 空格（更贴近课程里常见的写法），行宽 100。
+# 基于 Google 风格，改几处：缩进 4 空格（更贴近课程里常见的写法），行宽 100。
 # 提交前跑一次 scripts/format.ps1，或者在编辑器里开保存时自动格式化。
 ---
 Language: Cpp
@@ -7,6 +7,10 @@ IndentWidth: 4
 ColumnLimit: 100
 AccessModifierOffset: -4
 AllowShortFunctionsOnASingleLine: Inline
+# 保留 "case X: return "x";" 这种单行写法。项目里有两处纯查表的 switch
+# （FileType 转字符串、JSON 转义表），拆成三行会让 6 行的表变成 18 行，
+# 反而看不出它是张表。这跟上面 AllowShortFunctionsOnASingleLine 是同一类取舍。
+AllowShortCaseLabelsOnASingleLine: true
 DerivePointerAlignment: false
 PointerAlignment: Left
 SortIncludes: true

@@ -12,11 +12,11 @@ namespace cbk {
 
 const char* ToString(FileType type) {
     switch (type) {
-        case FileType::kRegular:     return "regular";
-        case FileType::kDirectory:   return "directory";
+        case FileType::kRegular: return "regular";
+        case FileType::kDirectory: return "directory";
         case FileType::kSymlinkFile: return "symlink-file";
-        case FileType::kSymlinkDir:  return "symlink-dir";
-        case FileType::kJunction:    return "junction";
+        case FileType::kSymlinkDir: return "symlink-dir";
+        case FileType::kJunction: return "junction";
         case FileType::kHardlinkRef: return "hardlink-ref";
         case FileType::kUnsupported: return "unsupported";
     }

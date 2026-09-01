@@ -62,8 +62,7 @@ public:
     /// 从 src 顺序读取并解析。每解析出一条条目就调用一次 on_entry，
     /// 该条目的内容通过 on_data 分块吐出（可能调用多次或零次），
     /// 之后才允许开始下一条。
-    virtual void Unpack(ISource& src,
-                        const std::function<void(const EntryMeta&)>& on_entry,
+    virtual void Unpack(ISource& src, const std::function<void(const EntryMeta&)>& on_entry,
                         const std::function<void(const uint8_t*, size_t)>& on_data) = 0;
 };
 

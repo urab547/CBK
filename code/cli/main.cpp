@@ -25,12 +25,12 @@ std::string JsonQuote(const std::string& text) {
     out.push_back('"');
     for (char c : text) {
         switch (c) {
-            case '"':  out += "\\\""; break;
+            case '"': out += "\\\""; break;
             case '\\': out += "\\\\"; break;
-            case '\n': out += "\\n";  break;
-            case '\r': out += "\\r";  break;
-            case '\t': out += "\\t";  break;
-            default:   out.push_back(c);
+            case '\n': out += "\\n"; break;
+            case '\r': out += "\\r"; break;
+            case '\t': out += "\\t"; break;
+            default: out.push_back(c);
         }
     }
     out.push_back('"');
@@ -67,21 +67,20 @@ int CommandInfo() {
 }
 
 void PrintUsage() {
-    std::cerr <<
-        "用法: cbk <命令> [选项]\n"
-        "\n"
-        "命令:\n"
-        "  backup   --source <目录> --dest <文件.cbk>\n"
-        "           [--packer <名字>] [--compress <名字>] [--encrypt <名字>]\n"
-        "           [--password-stdin] [--follow-symlinks] [--progress json]\n"
-        "  restore  --archive <文件.cbk> --dest <目录>\n"
-        "           [--password-stdin] [--overwrite skip|force|rename]\n"
-        "           [--no-metadata] [--progress json]\n"
-        "  list     --archive <文件.cbk> [--json] [--password-stdin]\n"
-        "  verify   --archive <文件.cbk>\n"
-        "  info     输出本程序支持的算法列表（JSON）\n"
-        "\n"
-        "退出码: 0 成功 / 1 部分成功 / 2 失败 / 3 参数错误\n";
+    std::cerr << "用法: cbk <命令> [选项]\n"
+                 "\n"
+                 "命令:\n"
+                 "  backup   --source <目录> --dest <文件.cbk>\n"
+                 "           [--packer <名字>] [--compress <名字>] [--encrypt <名字>]\n"
+                 "           [--password-stdin] [--follow-symlinks] [--progress json]\n"
+                 "  restore  --archive <文件.cbk> --dest <目录>\n"
+                 "           [--password-stdin] [--overwrite skip|force|rename]\n"
+                 "           [--no-metadata] [--progress json]\n"
+                 "  list     --archive <文件.cbk> [--json] [--password-stdin]\n"
+                 "  verify   --archive <文件.cbk>\n"
+                 "  info     输出本程序支持的算法列表（JSON）\n"
+                 "\n"
+                 "退出码: 0 成功 / 1 部分成功 / 2 失败 / 3 参数错误\n";
 }
 
 /// 尚未实现的命令统一走这里，保证 CI 和 GUI 拿到的是明确的失败而不是崩溃。
@@ -103,11 +102,11 @@ int main(int argc, char** argv) {
     }
 
     const std::string command = argv[1];
-    if (command == "info")    return CommandInfo();
-    if (command == "backup")  return NotImplemented(command);
+    if (command == "info") return CommandInfo();
+    if (command == "backup") return NotImplemented(command);
     if (command == "restore") return NotImplemented(command);
-    if (command == "list")    return NotImplemented(command);
-    if (command == "verify")  return NotImplemented(command);
+    if (command == "list") return NotImplemented(command);
+    if (command == "verify") return NotImplemented(command);
     if (command == "--help" || command == "-h" || command == "help") {
         PrintUsage();
         return static_cast<int>(cbk::Status::kOk);
