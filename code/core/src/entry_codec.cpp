@@ -24,6 +24,13 @@ bool ToFileType(uint8_t raw, FileType* out) {
 }  // namespace
 
 void WriteEntryMeta(const EntryMeta& meta, ISink& out) {
+    // 先在内存里拼完整条记录，再一次性写出去。
+    //
+    // 不能边算边写：长度前缀在最前面，而长度只有拼完才知道。ISink 是
+    // 只进不退的流（下游可能已经是压缩器了），没法回头改前面的字节。
+    //
+    // reserve 里路径按 3 倍估——UTF-16 转 UTF-8 时，中文字符 2 字节变
+    // 3 字节是最坏情况。估小了只是多一次扩容，不影响正确性。
     std::vector<uint8_t> record;
     record.reserve(kFixedPartSize + meta.relative_path.size() * 3 + meta.sddl.size() + 32);
 
@@ -57,6 +64,11 @@ void WriteEntryMeta(const EntryMeta& meta, ISink& out) {
     out.Write(framed.data(), framed.size());
 }
 
+// 解析到临时对象里，全部成功了才写回 out。
+//
+// 直接往 *out 里逐字段填的话，解析失败时调用方拿到的是一个填了一半的
+// 结构体——而返回值是 false，很容易被忽略，然后半个条目就流进了后面
+// 的还原逻辑。宁可多一次拷贝。
 bool DecodeEntryMeta(ByteReader* reader, EntryMeta* out) {
     EntryMeta meta;
 

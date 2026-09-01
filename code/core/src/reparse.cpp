@@ -62,6 +62,11 @@ void Record(uint32_t* win_error) {
 }
 
 /// 从 PathBuffer 里按字节偏移和字节长度取一个字符串。
+// 从 PathBuffer 里按偏移取一个字符串。
+//
+// 两个字段的单位是**字节不是字符**，所以要除以 sizeof(WCHAR)。按字符
+// 去算是这套结构体最经典的用错方式——路径会被砍成一半长，而且短路径
+// 恰好不出问题，看着像随机故障。
 std::wstring Slice(const WCHAR* path_buffer, USHORT byte_offset, USHORT byte_length) {
     if (byte_length == 0) return std::wstring();
     const WCHAR* start = path_buffer + (byte_offset / sizeof(WCHAR));

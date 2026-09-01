@@ -33,6 +33,11 @@ public:
 
 /// 统计流过的字节数，其余原样转发。用来算每个条目在打包器输出流里的
 /// 偏移和长度。
+// 插在打包器和 Stage 链之间，数打包器吐出了多少字节。
+//
+// 这是 data_offset / stored_size 的计量口径：打包器输出流里的位置，
+// 不是容器文件里的物理偏移。放在链头而不是链尾，正是为了绕开 Stage
+// 的内部缓冲——压缩器可能攒着几十 KB 不吐，链尾的计数跟条目边界对不上。
 class CountingSink : public ISink {
 public:
     explicit CountingSink(ISink* downstream) : downstream_(downstream) {}
@@ -77,6 +82,11 @@ bool IsCancelled(IProgressObserver* observer) {
     return observer != nullptr && observer->IsCancelled();
 }
 
+// 失败时返回的计数全是 0。
+//
+// 这是有意的：调用方在 status != kOk 时不该去信 entries_done 之类的数字。
+// 填个"到出错为止处理了多少"看着更有信息量，实际会诱导 GUI 去显示一个
+// 半真半假的进度。
 EngineResult Fail(Status status, const std::wstring& message) {
     EngineResult result;
     result.status = status;
@@ -88,6 +98,11 @@ EngineResult Fail(Status status, const std::wstring& message) {
 ///
 /// @param inverse true 时建逆变换，并且**顺序也要反过来**——写的时候是
 ///                先压缩后加密，读的时候就得先解密后解压。
+// 每次调用都造一套全新的 Stage 实例。
+//
+// 绝对不能复用：压缩器和加密器都是有状态的（余料缓冲、CBC 链接向量、
+// 霍夫曼码表）。拿写完数据区的那一套接着写索引区，解的时候是解不出来的，
+// 而且错得很隐蔽——数据区能解开，偏偏索引区解出乱码。
 bool BuildStages(const std::vector<std::string>& names, bool inverse, const std::string& password,
                  std::vector<std::unique_ptr<IStage>>* out, std::wstring* error) {
     const StageRegistry& registry = StageRegistry::Instance();
@@ -164,6 +179,11 @@ bool StreamFileContent(HANDLE handle, IPacker* packer, ISink& out, IProgressObse
 ///   · ACL 排在时间戳之后，是因为改 ACL 本身不会动时间戳，反过来不成立。
 ///
 /// 文件在 Pass 2 结束时调，目录在 Pass 3 逆序调。
+// 每一步失败都只 warn、不中断。
+//
+// 元数据设不上通常是权限问题（没有 SeRestorePrivilege、目标卷不支持 ACL），
+// 这类失败是可预期的。为了一个时间戳设不上就让整个还原失败，等于把
+// "还原出 99% 的正确数据"变成"什么都没有"，对用户是净损失。
 void ApplyEntryMetadata(const std::wstring& absolute, const EntryMeta& entry,
                         IProgressObserver* observer) {
     uint32_t error = 0;
@@ -205,6 +225,11 @@ bool PathExists(const std::wstring& path) {
 }
 
 /// kRename 策略下找一个还没被占用的名字："a.txt" -> "a (1).txt"。
+// 在扩展名之前插序号，不是简单往后拼。
+//
+// "报告.txt" 要变成 "报告 (1).txt" 而不是 "报告.txt (1)"——后者会让文件
+// 失去扩展名关联，双击打不开。判断扩展名时要确认那个点在最后一个路径
+// 分隔符**之后**，否则 "D:/a.b/c" 这种目录名带点的路径会被切错。
 std::wstring FindFreeName(const std::wstring& path) {
     const size_t slash = path.find_last_of(L'\\');
     const size_t dot = path.find_last_of(L'.');
@@ -264,6 +289,9 @@ public:
     }
 
     void WriteData(const uint8_t* data, size_t len) {
+        // writing_ 为假说明这条在 BeginEntry 时就被跳过了（目标已存在、
+        // 建文件失败、类型不支持）。数据还会照常流过来——打包器不知道
+        // 上层的取舍——这里静默丢掉就行，warn 在跳过时已经发过了。
         if (!writing_ || !handle_.IsValid()) return;
         size_t done = 0;
         while (done < len) {

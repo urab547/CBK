@@ -36,7 +36,11 @@ constexpr size_t kHeaderReservedLen = 54;
 // ---- Footer ----
 constexpr size_t kFooterReservedLen = 40;
 
-/// 写文件时循环到写完为止。WriteFile 允许部分写。
+// 循环写到写完为止。
+//
+// WriteFile 允许"部分写"——返回成功但 written < 要写的量。对本地磁盘
+// 这几乎不发生，可一旦目标是网络盘或者管道就完全可能。漏了这个循环的
+// bug 在开发机上永远复现不出来，只在别人的环境里偶发丢字节。
 bool WriteAll(HANDLE handle, const uint8_t* data, size_t len) {
     size_t done = 0;
     while (done < len) {
@@ -50,6 +54,8 @@ bool WriteAll(HANDLE handle, const uint8_t* data, size_t len) {
     return true;
 }
 
+// 用 SetFilePointerEx 而不是 SetFilePointer。后者的偏移是 32 位的，
+// 超过 4 GB 的包就定位不了了——而备份包超过 4 GB 是常态。
 bool SeekTo(HANDLE handle, uint64_t offset) {
     LARGE_INTEGER position;
     position.QuadPart = static_cast<LONGLONG>(offset);
@@ -63,7 +69,10 @@ bool FileSize(HANDLE handle, uint64_t* out) {
     return true;
 }
 
-/// 只读地按字节范围读文件。数据区和索引区各用一个。
+// 只读文件的一个字节区间。数据区和索引区各用一个。
+//
+// 自己记 remaining_ 而不是靠读到文件尾来判断结束：数据区后面紧跟着
+// 索引区和尾部，读过界的话会把索引的字节当成数据吐给打包器。
 class FileRangeSource : public ISource {
 public:
     FileRangeSource(platform::ScopedHandle handle, uint64_t size)
@@ -92,7 +101,9 @@ std::unique_ptr<ISource> OpenRange(const std::wstring& path, uint64_t offset, ui
     return std::unique_ptr<ISource>(new FileRangeSource(std::move(handle), size));
 }
 
-/// 从 source 里把剩下的全部读完，只算 CRC 不留内容。
+// 把一个区间整个读一遍只为了算 CRC，内容不留。
+//
+// 固定 kIoBlockSize 缓冲，所以 verify 一个 100 GB 的包也只占 64 KB 内存。
 uint32_t DrainCrc(ISource& source) {
     Crc32 crc;
     std::vector<uint8_t> buffer(kIoBlockSize);
@@ -104,8 +115,11 @@ uint32_t DrainCrc(ISource& source) {
     return crc.Value();
 }
 
-/// 算法名允许的字符。故意收紧到小写字母、数字、连字符和点，
-/// 这样 PipelineDesc 的解析器永远不需要考虑转义。
+// 算法名的字符集故意收得很紧：只允许小写字母、数字、连字符、点。
+//
+// 这样 PipelineDesc 的解析器永远不需要考虑转义——分隔符 ; = , 和大写
+// 字母都进不来。源根路径不并进那一行，也正是因为路径里可能出现这些字符。
+// 收紧字符集的代价是队友起名字受限，收益是解析器少一整类 bug。
 bool IsValidAlgorithmName(const std::string& name) {
     if (name.empty()) return false;
     for (char c : name) {
@@ -121,7 +135,10 @@ uint64_t NowAsFileTime() {
     return (static_cast<uint64_t>(now.dwHighDateTime) << 32) | now.dwLowDateTime;
 }
 
-/// 按 PipelineDesc 推出头部的 flags 位。
+// 从 PipelineDesc 反推头部的 flags 位。
+//
+// flags 跟 PipelineDesc 是冗余的，但它在冻结的格式里，得如实填。
+// 好处是外部工具不用解析那行 ASCII 就能一眼看出包有没有加密。
 uint16_t ComputeFlags(const PipelineDesc& pipeline) {
     uint16_t flags = 0;
     if (!pipeline.packer.empty()) flags |= kFlagPacked;
@@ -148,6 +165,11 @@ std::string PipelineDesc::Serialize() const {
     return text;
 }
 
+// 解析器故意写得很死板：必须严格是 "packer=X;stages=Y" 这个形状。
+//
+// 不做容错、不跳空白、不认大小写变体。宽松的解析器在这里是负资产——
+// 它会把一个损坏的包"猜"成某个能解析的配置，然后拿错误的算法链去解数据，
+// 产出一堆垃圾字节。直接拒绝、让调用方报错，才是对用户负责。
 bool PipelineDesc::Parse(const std::string& text, PipelineDesc* out) {
     static const std::string kPackerKey = "packer=";
     static const std::string kStagesKey = ";stages=";
@@ -186,6 +208,10 @@ void WriteIndex(const std::vector<EntryMeta>& entries, ISink& out) {
     }
 }
 
+// 读索引区。条数必须跟头部记的严格相等。
+//
+// 多一条少一条都说明包不对：少了是被截断，多了是头部被改过。这里不做
+// 任何"能读多少算多少"的容错——索引是还原的地图，地图不完整就不该上路。
 bool ReadIndex(ISource& source, uint64_t expected_count, std::vector<EntryMeta>* out) {
     std::vector<EntryMeta> entries;
     for (;;) {
@@ -304,6 +330,10 @@ ISink& ArchiveWriter::DataSink() {
     return *sink_;
 }
 
+// 数据区写完，把计数快照下来再清零，同一个 RegionSink 接着服务索引区。
+//
+// 不新建一个 sink 是因为两个区在同一个文件里、位置连续，共用一个写入器
+// 天然保证了"索引紧跟在数据后面"这个布局约束。
 void ArchiveWriter::EndData() {
     if (phase_ != Phase::kData) return;
     data_bytes_ = sink_->Bytes();
@@ -316,6 +346,14 @@ ISink& ArchiveWriter::IndexSink() {
     return *sink_;
 }
 
+// 收尾：算出各区的最终大小，写尾部，再回头把头部补完整。
+//
+// 为什么是"先写尾部再回填头部"这个顺序：头部回填要 seek 回文件开头，
+// 而尾部必须落在文件末尾。反过来做的话，seek 到 0 之后文件指针就不在
+// 末尾了，还得再 seek 一次回去——多一次定位就多一个出错的地方。
+//
+// 头部之所以要回填，是因为 dataSize / indexOffset / indexSize 这些值
+// 只有全部写完才知道。这也是全流程唯一一次回头改已写出的字节。
 Status ArchiveWriter::Close(uint64_t entry_count, uint64_t total_original_bytes,
                             std::wstring* error) {
     if (phase_ == Phase::kDone) return Status::kOk;
@@ -386,6 +424,13 @@ Status ArchiveWriter::Close(uint64_t entry_count, uint64_t total_original_bytes,
     return Status::kOk;
 }
 
+// 关闭并删除半成品，可以重复调用。
+//
+// 先 reset sink_ 再 reset file_：sink_ 里存着裸 HANDLE，句柄关掉之后
+// 它就成了悬垂引用。虽然 Abort 之后没人会再往里写，但顺序反了就是个
+// 等着被将来某次改动踩到的地雷。
+//
+// path_ 清空之后重复调用就是空操作，所以析构里无脑调一次是安全的。
 void ArchiveWriter::Abort() {
     sink_.reset();
     file_.Reset();
@@ -398,6 +443,16 @@ void ArchiveWriter::Abort() {
 
 // ============================================================ ArchiveReader
 
+// 打开并校验一个容器。只读明文部分，数据区和索引区按需再流式读。
+//
+// 校验分三层，一层比一层贵，按顺序做，能早拒绝就早拒绝：
+//   1. 文件长度、magic、格式版本 —— 只读 128 字节就能判
+//   2. 布局不变式（各区偏移和大小自洽）—— 纯算术，零 IO
+//   3. 三个 CRC32 —— 要把整个包读一遍，所以不在 Open 里做，
+//      留给 Verify()，也就是 cbk verify 命令
+//
+// 这个分层的意义是：还原一个大包时，结构性损坏在毫秒级就被拒绝，
+// 不用先花几分钟把整个包读一遍算 CRC。
 Status ArchiveReader::Open(const std::wstring& path, std::wstring* error) {
     const auto fail = [error](const std::wstring& what) {
         if (error != nullptr) *error = what;

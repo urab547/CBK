@@ -173,6 +173,10 @@ struct Args {
 };
 
 /// 取下一个参数值，缺了就记错误。
+//
+// 注意它会直接推进调用方的循环下标——把值消费掉，免得下一轮又把这个值
+// 当成选项名去匹配。这是手写解析器最容易漏的一步：漏了的话，选项后面
+// 跟的那个路径会被当成"不认识的选项"报错。
 bool TakeValue(const std::vector<std::wstring>& argv, size_t* index, const std::wstring& option,
                std::wstring* out, Args* args) {
     if (*index + 1 >= argv.size()) {
@@ -184,6 +188,14 @@ bool TakeValue(const std::vector<std::wstring>& argv, size_t* index, const std::
     return true;
 }
 
+// 手写参数解析，不引第三方库。
+//
+// 理论上可以用 CLI11 之类，但为了一个五命令的程序引一个几千行的头文件
+// 不划算，而且 core 本来就是零第三方依赖，这边跟着保持一致——交付时
+// "整个项目除了 GoogleTest 和 PySide6 没有别的依赖"这句话更好说。
+//
+// 遇到第一个错误就 break，不继续往下解析。参数写错时用户要的是一条
+// 清楚的提示，不是一串连锁报错。
 Args ParseArgs(const std::vector<std::wstring>& argv, size_t start) {
     Args args;
     for (size_t i = start; i < argv.size(); ++i) {
@@ -393,6 +405,11 @@ int CommandVerify(const Args& args) {
     return ToExitCode(cbk::Status::kOk);
 }
 
+// 用法输出到 stderr 而不是 stdout。
+//
+// stdout 留给 JSON 事件流，GUI 在那头逐行解析。把用法文本混进去会让它
+// 撞上一行解析不了的东西。虽然只在打印帮助时才发生，但契约就是契约：
+// stdout 上只能有 JSON。
 void PrintUsage() {
     static const char kUsage[] =
         "用法: cbk <命令> [选项]\n"

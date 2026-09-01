@@ -12,10 +12,17 @@ $files = Get-ChildItem -Path "code/core", "code/cli", "code/tests" `
 $total = 0
 $comment = 0
 $blank = 0
-$inBlock = $false
 
 foreach ($f in $files) {
-    foreach ($line in (Get-Content $f.FullName)) {
+    # 每个文件单独复位。不复位的话，某个文件末尾要是有个没闭合的块注释，
+    # 后面所有文件都会被整个算成注释。
+    $inBlock = $false
+
+    # -Encoding UTF8 不能省。Windows PowerShell 5.1 的 Get-Content 不指定
+    # 编码时按系统 ANSI 代码页解码，而我们的源文件是 UTF-8 无 BOM。
+    # 在中文 Windows（GBK）上，中文注释的字节会被错误组合，连换行都被吞掉——
+    # 实测一个 128 行的文件只读出 74 行，整体注释率被少算了 4 个百分点。
+    foreach ($line in (Get-Content $f.FullName -Encoding UTF8)) {
         $t = $line.Trim()
         $total++
         if ($t -eq "") { $blank++; continue }

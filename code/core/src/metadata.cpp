@@ -50,6 +50,11 @@ bool ReadMetadataByPath(const std::wstring& path, bool no_follow_reparse, EntryM
     return ReadMetadataFromHandle(handle.Get(), meta);
 }
 
+// 只要 FILE_WRITE_ATTRIBUTES 权限，不要 GENERIC_WRITE。
+//
+// 权限要得越少，能成功的对象越多——比如一个我们只有"写属性"权限、
+// 没有写数据权限的文件，要 GENERIC_WRITE 会直接失败，而它的时间戳
+// 本来是设得上的。
 bool ApplyTimestamps(const std::wstring& path, const EntryMeta& meta, bool no_follow_reparse,
                      uint32_t* win_error) {
     platform::ScopedHandle handle = platform::OpenForAttributeWrite(path, no_follow_reparse);
