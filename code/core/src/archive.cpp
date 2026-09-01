@@ -256,7 +256,7 @@ Status ArchiveWriter::Fail(const std::wstring& what, std::wstring* error) {
 
 Status ArchiveWriter::Open(const std::wstring& path, const std::wstring& source_root,
                            const PipelineDesc& pipeline, std::wstring* error) {
-    source_root_utf8_ = platform::ToUtf8(source_root);
+    source_root_utf8_ = ToUtf8(source_root);
     if (source_root_utf8_.size() > kMaxSourceRootUtf8) {
         if (error != nullptr) {
             *error = L"源根路径转成 UTF-8 后超过 65535 字节，容器头部存不下";
@@ -479,9 +479,9 @@ Status ArchiveReader::Open(const std::wstring& path, std::wstring* error) {
     }
     const std::string pipeline_text(reinterpret_cast<const char*>(prologue.data()), pipeline_len);
     if (!PipelineDesc::Parse(pipeline_text, &parsed.pipeline)) {
-        return fail(L"PipelineDesc 解析失败：" + platform::FromUtf8(pipeline_text));
+        return fail(L"PipelineDesc 解析失败：" + FromUtf8(pipeline_text));
     }
-    parsed.source_root = platform::FromUtf8(std::string(
+    parsed.source_root = FromUtf8(std::string(
         reinterpret_cast<const char*>(prologue.data()) + pipeline_len, source_root_len));
 
     // ---- 尾部 ----

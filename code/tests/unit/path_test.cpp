@@ -28,18 +28,18 @@ TEST(Utf8, RoundTripsAsciiChineseAndEmoji) {
         L"空格 和 符号 !@#$%^&()",
     };
     for (const std::wstring& original : cases) {
-        EXPECT_EQ(original, pf::FromUtf8(pf::ToUtf8(original)));
+        EXPECT_EQ(original, cbk::FromUtf8(cbk::ToUtf8(original)));
     }
 }
 
 TEST(Utf8, EmptyStringStaysEmpty) {
-    EXPECT_TRUE(pf::ToUtf8(L"").empty());
-    EXPECT_TRUE(pf::FromUtf8("").empty());
+    EXPECT_TRUE(cbk::ToUtf8(L"").empty());
+    EXPECT_TRUE(cbk::FromUtf8("").empty());
 }
 
 TEST(Utf8, ChineseTakesThreeBytesEach) {
     // 顺带钉住一件事：转出来的是 UTF-8 而不是本地代码页（GBK 会是 2 字节）。
-    EXPECT_EQ(6u, pf::ToUtf8(L"中文").size());
+    EXPECT_EQ(6u, cbk::ToUtf8(L"中文").size());
 }
 
 // ============================================================ IsExtendedPath
@@ -167,14 +167,14 @@ TEST(LongPath, CreatesReadsAndDeletesPathBeyondMaxPath) {
     for (int i = 0; i < 12; ++i) segments.push_back(segment);
 
     ASSERT_NE(0, CreateDirectoryW(pf::ToExtendedPath(root).c_str(), nullptr))
-        << "建测试根目录失败: " << pf::ToUtf8(pf::FormatWinError(GetLastError()));
+        << "建测试根目录失败: " << cbk::ToUtf8(pf::FormatWinError(GetLastError()));
 
     std::wstring deep = root;
     for (const std::wstring& s : segments) {
         deep = pf::JoinPath(deep, s);
         ASSERT_NE(0, CreateDirectoryW(pf::ToExtendedPath(deep).c_str(), nullptr))
             << "在第 " << deep.size()
-            << " 字符处建目录失败: " << pf::ToUtf8(pf::FormatWinError(GetLastError()));
+            << " 字符处建目录失败: " << cbk::ToUtf8(pf::FormatWinError(GetLastError()));
     }
     EXPECT_GT(deep.size(), 260u) << "测试没造出足够深的路径，这个用例就白测了";
 
@@ -184,7 +184,7 @@ TEST(LongPath, CreatesReadsAndDeletesPathBeyondMaxPath) {
     {
         pf::ScopedHandle writer = pf::CreateForWrite(file);
         ASSERT_TRUE(writer.IsValid())
-            << "深路径下建文件失败: " << pf::ToUtf8(pf::FormatWinError(GetLastError()));
+            << "深路径下建文件失败: " << cbk::ToUtf8(pf::FormatWinError(GetLastError()));
         DWORD written = 0;
         ASSERT_NE(0, WriteFile(writer.Get(), payload, sizeof(payload) - 1, &written, nullptr));
         EXPECT_EQ(sizeof(payload) - 1, written);
@@ -193,7 +193,7 @@ TEST(LongPath, CreatesReadsAndDeletesPathBeyondMaxPath) {
     {
         pf::ScopedHandle reader = pf::OpenForRead(file, true);
         ASSERT_TRUE(reader.IsValid())
-            << "深路径下读文件失败: " << pf::ToUtf8(pf::FormatWinError(GetLastError()));
+            << "深路径下读文件失败: " << cbk::ToUtf8(pf::FormatWinError(GetLastError()));
         char buffer[64] = {};
         DWORD read = 0;
         ASSERT_NE(0, ReadFile(reader.Get(), buffer, sizeof(buffer), &read, nullptr));

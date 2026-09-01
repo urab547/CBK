@@ -16,11 +16,10 @@ add_library(cbk_core STATIC
     src/archive.cpp
     src/packers/native_packer.cpp
     src/scanner.cpp
-
-    # 新增的实现文件加在下面对应的分组里：
-    # src/metadata.cpp
-    # src/engine.cpp
-    # src/packers/native_packer.cpp
+    src/stage_pipeline.cpp
+    src/text.cpp
+    src/metadata.cpp
+    src/engine.cpp
 
     # —— 队友 A：打包 / 压缩 ——
     # src/packers/tar_packer.cpp

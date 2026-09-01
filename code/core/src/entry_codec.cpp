@@ -44,8 +44,8 @@ void WriteEntryMeta(const EntryMeta& meta, ISink& out) {
     body.WriteU32(meta.reparse_tag);
     body.WriteU64(meta.hardlink_ref_id);
 
-    body.WriteLengthPrefixed(platform::ToUtf8(meta.relative_path));
-    body.WriteLengthPrefixed(platform::ToUtf8(meta.link_target));
+    body.WriteLengthPrefixed(ToUtf8(meta.relative_path));
+    body.WriteLengthPrefixed(ToUtf8(meta.link_target));
     body.WriteLengthPrefixed(meta.sddl);
 
     std::vector<uint8_t> framed;
@@ -85,8 +85,8 @@ bool DecodeEntryMeta(ByteReader* reader, EntryMeta* out) {
     if (!reader->IsOk()) return false;
     if (!ToFileType(raw_type, &meta.type)) return false;
 
-    meta.relative_path = platform::FromUtf8(relative_path);
-    meta.link_target = platform::FromUtf8(link_target);
+    meta.relative_path = FromUtf8(relative_path);
+    meta.link_target = FromUtf8(link_target);
     meta.sddl = sddl;
 
     *out = std::move(meta);

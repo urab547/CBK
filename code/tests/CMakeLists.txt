@@ -35,10 +35,11 @@ add_executable(cbk_tests
     unit/packer_roundtrip_test.cpp
     unit/archive_test.cpp
     unit/scanner_test.cpp
+    unit/metadata_test.cpp
+    unit/engine_test.cpp
 
     # 新增测试文件加在下面：
     # unit/stage_roundtrip_test.cpp    # 队友 A/B：随机字节正变换再逆变换
-    # unit/metadata_test.cpp           # Z：属性、时间戳、SDDL 往返
 )
 
 target_link_libraries(cbk_tests PRIVATE cbk_core GTest::gtest_main)
