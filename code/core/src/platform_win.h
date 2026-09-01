@@ -14,22 +14,13 @@
 #include <cstdint>
 #include <string>
 
+#include "cbk/text.h"
+
 namespace cbk {
 namespace platform {
 
-// ============================================================================
-// 编码转换
-// ============================================================================
-//
-// 规矩：内存里一律 std::wstring（UTF-16），只有落到字节流——写进 .cbk 容器、
-// 打进 stdout 的 JSON——才转 UTF-8。Windows 的文件名本来就是 UTF-16，
-// 中途来回转只会丢字符。
-
-/// UTF-16 转 UTF-8。输入为空时返回空串。
-std::string ToUtf8(const std::wstring& text);
-
-/// UTF-8 转 UTF-16。输入为空时返回空串。
-std::wstring FromUtf8(const std::string& text);
+// 编码转换搬到了对外契约 cbk/text.h：CLI 也需要它，而 CLI 只该看见
+// include/cbk 下的东西。这里 include 一下，老调用点不用改。
 
 // ============================================================================
 // 路径

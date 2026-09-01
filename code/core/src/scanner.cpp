@@ -6,6 +6,7 @@
 #include <utility>
 #include <vector>
 
+#include "src/metadata.h"
 #include "src/platform_win.h"
 
 namespace cbk {
@@ -177,6 +178,19 @@ Status Scanner::Scan(const EntryCallback& on_entry, ScanStats* stats) {
             if (meta.type == FileType::kRegular) {
                 meta.original_size = ToUint64(find_data.nFileSizeHigh, find_data.nFileSizeLow);
                 local.total_bytes += meta.original_size;
+            }
+
+            // 目录和重解析点的元数据要从对象本身再读一遍。
+            // WIN32_FIND_DATAW 给的是父目录索引项里的缓存，NTFS 更新它是
+            // 惰性的：刚往目录里写完文件就遍历，读到的 lastWriteTime 能差
+            // 好几毫秒，往返测试就挂在这儿。
+            //
+            // 普通文件不在这里补——引擎读内容时本来就要开句柄，在那儿顺手
+            // 刷一次更划算，也更准（拿到的是读到的那份内容对应的时间）。
+            if (meta.type != FileType::kRegular) {
+                const std::wstring absolute = platform::JoinPath(root_, meta.relative_path);
+                // 读不到就沿用 find data 那份——陈旧的值也比没有值强。
+                ReadMetadataByPath(absolute, true, &meta);
             }
 
             if (meta.type == FileType::kUnsupported) {

@@ -179,19 +179,19 @@ TEST(Archive, RoundTripsHeaderDataAndIndex) {
         cbk::ArchiveWriter writer;
         std::wstring error;
         ASSERT_EQ(cbk::Status::kOk, writer.Open(archive_path, source_root, NativeOnly(), &error))
-            << pf::ToUtf8(error);
+            << cbk::ToUtf8(error);
 
         writer.DataSink().Write(reinterpret_cast<const uint8_t*>(payload.data()), payload.size());
         writer.EndData();
         cbk::WriteIndex(entries, writer.IndexSink());
 
         ASSERT_EQ(cbk::Status::kOk, writer.Close(entries.size(), 4321, &error))
-            << pf::ToUtf8(error);
+            << cbk::ToUtf8(error);
     }
 
     cbk::ArchiveReader reader;
     std::wstring error;
-    ASSERT_EQ(cbk::Status::kOk, reader.Open(archive_path, &error)) << pf::ToUtf8(error);
+    ASSERT_EQ(cbk::Status::kOk, reader.Open(archive_path, &error)) << cbk::ToUtf8(error);
 
     const cbk::ArchiveHeader& header = reader.Header();
     EXPECT_EQ(cbk::kFormatVersion, header.format_version);
@@ -205,7 +205,7 @@ TEST(Archive, RoundTripsHeaderDataAndIndex) {
 
     // 布局不变式：dataOffset == 128 + pipelineDescLen + sourceRootLen
     const uint64_t expected_offset =
-        cbk::kFileHeaderSize + NativeOnly().Serialize().size() + pf::ToUtf8(source_root).size();
+        cbk::kFileHeaderSize + NativeOnly().Serialize().size() + cbk::ToUtf8(source_root).size();
     EXPECT_EQ(expected_offset, header.data_offset);
     EXPECT_EQ(header.data_offset + header.data_size, header.index_offset);
 
@@ -222,7 +222,7 @@ TEST(Archive, RoundTripsHeaderDataAndIndex) {
     ASSERT_EQ(entries.size(), parsed.size());
     EXPECT_EQ(entries[0].relative_path, parsed[0].relative_path);
 
-    EXPECT_EQ(cbk::Status::kOk, reader.Verify(&error)) << pf::ToUtf8(error);
+    EXPECT_EQ(cbk::Status::kOk, reader.Verify(&error)) << cbk::ToUtf8(error);
 }
 
 TEST(Archive, SourceRootSurvivesDelimiterCharacters) {
@@ -242,7 +242,7 @@ TEST(Archive, SourceRootSurvivesDelimiterCharacters) {
 
     cbk::ArchiveReader reader;
     std::wstring error;
-    ASSERT_EQ(cbk::Status::kOk, reader.Open(archive_path, &error)) << pf::ToUtf8(error);
+    ASSERT_EQ(cbk::Status::kOk, reader.Open(archive_path, &error)) << cbk::ToUtf8(error);
     EXPECT_EQ(nasty_root, reader.Header().source_root);
 }
 
