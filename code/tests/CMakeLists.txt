@@ -28,15 +28,21 @@ FetchContent_MakeAvailable(googletest)
 
 add_executable(cbk_tests
     unit/registry_test.cpp
+    unit/event_test.cpp
+    unit/path_test.cpp
 
     # 新增测试文件加在下面：
     # unit/packer_roundtrip_test.cpp   # 队友 A：手捏 EntryMeta 打包再解包
     # unit/stage_roundtrip_test.cpp    # 队友 A/B：随机字节正变换再逆变换
-    # unit/path_test.cpp               # Z：长路径与中文路径
     # unit/metadata_test.cpp           # Z：属性、时间戳、SDDL 往返
 )
 
 target_link_libraries(cbk_tests PRIVATE cbk_core GTest::gtest_main)
+
+# core/src 是内部实现目录，对 cbk_core 之外是不可见的。测试要白盒验证
+# platform_win 这类内部组件，所以把 core/ 加进来，用 "src/xxx.h" 引用。
+# 只有测试有这个特权——cli 和 gui 只能用 include/cbk 下的对外契约。
+target_include_directories(cbk_tests PRIVATE ${CMAKE_SOURCE_DIR}/core)
 
 include(GoogleTest)
 gtest_discover_tests(cbk_tests)

@@ -8,13 +8,14 @@ add_library(cbk_core STATIC
     src/registry.cpp
     src/builtins.cpp
 
-    # 新增的实现文件加在下面对应的分组里：
     # —— Z：基础 / 文件类型 / 元数据 ——
+    src/platform_win.cpp
+
+    # 新增的实现文件加在下面对应的分组里：
     # src/scanner.cpp
     # src/metadata.cpp
     # src/archive.cpp
     # src/engine.cpp
-    # src/platform_win.cpp
     # src/packers/native_packer.cpp
 
     # —— 队友 A：打包 / 压缩 ——
@@ -29,7 +30,10 @@ add_library(cbk_core STATIC
 )
 
 target_include_directories(cbk_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
-target_include_directories(cbk_core PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+# 内部头文件按 "src/xxx.h" 引用，而不是裸的 "xxx.h"。
+# 一来看一眼就知道这是内部实现而非对外契约，二来 cpplint 的
+# build/include_subdir 检查要求 include 必须带目录。
+target_include_directories(cbk_core PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_compile_features(cbk_core PUBLIC cxx_std_17)
 
 if(WIN32)
