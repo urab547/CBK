@@ -10,11 +10,15 @@ add_library(cbk_core STATIC
 
     # —— Z：基础 / 文件类型 / 元数据 ——
     src/platform_win.cpp
+    src/crc32.cpp
+    src/byte_io.cpp
+    src/entry_codec.cpp
+    src/archive.cpp
+    src/packers/native_packer.cpp
+    src/scanner.cpp
 
     # 新增的实现文件加在下面对应的分组里：
-    # src/scanner.cpp
     # src/metadata.cpp
-    # src/archive.cpp
     # src/engine.cpp
     # src/packers/native_packer.cpp
 
