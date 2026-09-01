@@ -281,31 +281,51 @@ TEST(Engine, MissingArchiveFails) {
 
 // ============================================================ 部分成功
 
-TEST(Engine, LockedFileIsSkippedAndReportedAsPartial) {
-    // 备份软件必须能对付"文件被别的进程独占"，跳过并继续，
-    // 而不是整个备份失败。退出码 1 = 包可用，但有条目被跳过。
+/// 在 OnStart 触发时删掉一个文件。
+///
+/// OnStart 的时机正好卡在"遍历已经做完、内容还没开始读"之间，所以能
+/// 确定性地造出"条目在索引里、文件却打不开"的局面。
+///
+/// 为什么不用"另开一个句柄独占锁住"来造这个局面：那个办法**不跨环境**。
+/// 实测本地非提权进程会撞上共享冲突、条目被跳过；而 CI 的运行器是提权的、
+/// 拿到了 SeBackupPrivilege，同一个文件照样打得开，断言就全反过来了。
+/// 顺带说，那对产品是好事——提权跑的时候连独占锁定的文件都能备份。
+class DeleteOnStart : public cbk::IProgressObserver {
+public:
+    explicit DeleteOnStart(std::wstring victim) : victim_(std::move(victim)) {}
+
+    void OnStart(const cbk::StartInfo&) override {
+        DeleteFileW(pf::ToExtendedPath(victim_).c_str());
+    }
+    void OnWarn(const cbk::WarnInfo& info) override { warns.push_back(info); }
+
+    std::vector<cbk::WarnInfo> warns;
+
+private:
+    std::wstring victim_;
+};
+
+TEST(Engine, UnreadableEntryIsSkippedAndReportedAsPartial) {
+    // 备份软件必须能对付"某个文件读不了"——跳过、发 warn、继续，
+    // 而不是整个备份失败。退出码 1 的含义就是"包可用，但有条目被跳过"。
     EnsureRegistered();
     cbk_test::TempDir temp;
     temp.MakeDir(L"src");
     temp.MakeFile(L"src\\正常.txt", "这个能备份");
-    const std::wstring locked = temp.MakeFile(L"src\\被占用.txt", "这个不行");
+    temp.MakeFile(L"src\\会消失.txt", "这个在遍历之后被删掉");
 
-    // dwShareMode = 0：谁都别想再打开它。
-    HANDLE hog = CreateFileW(pf::ToExtendedPath(locked).c_str(), GENERIC_READ, 0, nullptr,
-                             OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-    ASSERT_NE(INVALID_HANDLE_VALUE, hog);
-
-    Recorder observer;
+    DeleteOnStart observer(temp.At(L"src\\会消失.txt"));
     const cbk::EngineResult result =
         cbk::RunBackup(BackupTo(temp.At(L"src"), temp.At(L"o.cbk")), &observer);
-    CloseHandle(hog);
 
     EXPECT_EQ(cbk::Status::kPartial, result.status);
     EXPECT_EQ(1u, result.entries_skipped);
+    EXPECT_EQ(1u, result.entries_done);
     ASSERT_FALSE(observer.warns.empty());
     EXPECT_NE(0u, observer.warns[0].win_error) << "warn 应该带上 Win32 错误码";
+    EXPECT_EQ(L"会消失.txt", observer.warns[0].path);
 
-    // 包本身仍然可用，能还原出没被跳过的那些。
+    // 关键：包本身仍然是完整可用的，能还原出没被跳过的那些。
     std::wstring error;
     ASSERT_EQ(cbk::Status::kOk, cbk::VerifyArchive(temp.At(L"o.cbk"), &error))
         << cbk::ToUtf8(error);
