@@ -29,7 +29,9 @@ add_library(cbk_core STATIC
     # src/stages/lz77_stage.cpp
 
     # —— 队友 B：加密 ——
-    # src/stages/xor_stage.cpp
+    src/stages/xor_stage.cpp
+    src/stages/vigenere_stage.cpp
+    src/stages/xor_cbc_stage.cpp
     # src/stages/aes_stage.cpp
 )
 
