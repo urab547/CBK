@@ -15,6 +15,10 @@
 #include "cbk/stage.h"
 #include "src/packers/native_packer.h"
 
+#include "src/stages/vigenere_stage.h"
+#include "src/stages/xor_cbc_stage.h"
+#include "src/stages/xor_stage.h"
+
 // 新增打包算法时在这里加 include：
 // #include "src/packers/tar_packer.h"      // 队友 A
 // #include "src/packers/cpio_packer.h"     // 队友 A
@@ -37,11 +41,11 @@ void RegisterBuiltinPackers() {
 
 void RegisterBuiltinStages() {
     StageRegistry& registry = StageRegistry::Instance();
-    (void)registry;  // 同上
-
+    registry.Register(std::make_unique<XorStageFactory>());
+    registry.Register(std::make_unique<VigenereStageFactory>());
+    registry.Register(std::make_unique<XorCbcStageFactory>());
     // registry.Register(std::make_unique<HuffmanStageFactory>());
     // registry.Register(std::make_unique<Lz77StageFactory>());
-    // registry.Register(std::make_unique<XorStageFactory>());
     // registry.Register(std::make_unique<AesStageFactory>());
 }
 
