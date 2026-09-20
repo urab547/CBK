@@ -1,8 +1,11 @@
+// Copyright 2026 CBK Project.
 #include "src/stages/xor_cbc_stage.h"
 
 #include <algorithm>
 #include <cstring>
 #include <random>
+#include <string>
+#include <vector>
 
 #include "cbk/sink.h"
 

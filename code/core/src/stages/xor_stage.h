@@ -1,3 +1,4 @@
+// Copyright 2026 CBK Project.
 #pragma once
 #include <cstddef>
 #include <cstdint>

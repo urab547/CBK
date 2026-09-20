@@ -1,6 +1,9 @@
+// Copyright 2026 CBK Project.
 #include "src/stages/vigenere_stage.h"
 
 #include <algorithm>
+#include <string>
+#include <vector>
 
 #include "cbk/sink.h"
 
@@ -39,7 +42,7 @@ void VigenereStage::Process(const uint8_t* data, size_t len, ISink& out) {
 }
 
 void VigenereStage::Finish(ISink& /*out*/) {
-    // ÎÞÐè³åË¢×´Ì¬
+    // Vigenere has no tail state.
 }
 
 }  // namespace cbk
