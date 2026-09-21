@@ -44,7 +44,7 @@ add_executable(cbk_tests
     unit/filetype_test.cpp
 
     # 新增测试文件加在下面：
-    # unit/stage_roundtrip_test.cpp    # 队友 A/B：随机字节正变换再逆变换
+    unit/stage_roundtrip_test.cpp    # 队友 A/B：随机字节正变换再逆变换
 )
 
 target_link_libraries(cbk_tests PRIVATE cbk_core GTest::gtest_main)

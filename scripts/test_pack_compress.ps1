@@ -1,7 +1,11 @@
 # Windows CLI 端到端矩阵：tar/cpio × 无压缩/Huffman/LZ77。
 # 日志、容器和还原目录保留在 gitignore 忽略的 code/build 下。
 [CmdletBinding()]
-param([string]$Cbk = "$PSScriptRoot/../code/build/msvc/bin/Release/cbk.exe")
+param(
+    [string]$Cbk = "$PSScriptRoot/../code/build/msvc/bin/Release/cbk.exe",
+    [ValidateSet('none', 'xor', 'vigenere', 'xor-cbc')]
+    [string]$Cipher = 'none'
+)
 
 $ErrorActionPreference = 'Stop'
 $cbkPath = (Resolve-Path -LiteralPath $Cbk).Path
@@ -45,7 +49,13 @@ foreach ($file in $files) {
 
 function Invoke-CbkChecked {
     param([string[]]$Arguments, [string]$Log)
-    & $cbkPath @Arguments | Out-File -LiteralPath $Log -Encoding utf8
+    if ($Cipher -ne 'none' -and $Arguments[0] -in @('backup', 'list', 'restore')) {
+        if ($Arguments[0] -eq 'backup') { $Arguments += @('--encrypt', $Cipher) }
+        $Arguments += '--password-stdin'
+        'cbk-integration-test-password' | & $cbkPath @Arguments | Out-File -LiteralPath $Log -Encoding utf8
+    } else {
+        & $cbkPath @Arguments | Out-File -LiteralPath $Log -Encoding utf8
+    }
     if ($LASTEXITCODE -ne 0) { throw "cbk 失败，退出码 $LASTEXITCODE，日志 $Log" }
 }
 
@@ -64,6 +74,9 @@ foreach ($packer in @('tar', 'cpio')) {
         $listing = Get-Content -LiteralPath $listingPath -Raw | ConvertFrom-Json
         $expectedCount = $files.Count + $directories.Count
         $expectedStages = if ($compressor -eq 'none') { '' } else { $compressor }
+        if ($Cipher -ne 'none') {
+            $expectedStages = (@($compressor, $Cipher) | Where-Object { $_ -ne 'none' }) -join ','
+        }
         if ($listing.packer -ne $packer -or ($listing.stages -join ',') -ne $expectedStages -or
             $listing.entryCount -ne $expectedCount -or $listing.entries.Count -ne $expectedCount) {
             throw "$label 列表算法或条目数量不符"
@@ -117,7 +130,7 @@ foreach ($packer in @('tar', 'cpio')) {
         } finally { $stream.Dispose() }
         & $cbkPath verify --archive $corrupt | Out-File (Join-Path $testRoot "$label-corrupt.log")
         if ($LASTEXITCODE -ne 2) { throw "$label 损坏容器未返回失败退出码 2" }
-        $results += [pscustomobject]@{ combination = $label; files = $files.Count;
+        $results += [pscustomobject]@{ combination = $label; cipher = $Cipher; files = $files.Count;
             directories = $directories.Count; archiveBytes = (Get-Item -LiteralPath $archive).Length }
         Write-Host "通过：$label，$($files.Count) 个文件 SHA256、目录、只读/时间、硬链接、损坏检测。"
         # 空源目录也必须经过完整流水线，验证各算法的结束标记。
