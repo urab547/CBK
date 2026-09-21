@@ -26,7 +26,7 @@ private:
                                        // forward before padding)
     std::vector<uint8_t> prev_block_;  // previous cipher block (IV or last cipher)
     std::vector<uint8_t>
-        plain_out_buffer_;  // stores decrypted plaintext blocks until Finish for padding removal
+        plain_out_buffer_;  // retains only the final plaintext block for padding removal
     bool wrote_iv_ = false;
     bool inverse_ = false;
 
