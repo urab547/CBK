@@ -13,20 +13,17 @@
 
 #include "cbk/packer.h"
 #include "cbk/stage.h"
+#include "src/packers/cpio_packer.h"
 #include "src/packers/native_packer.h"
-
+#include "src/packers/tar_packer.h"
+#include "src/stages/huffman_stage.h"
+#include "src/stages/lz77_stage.h"
 #include "src/stages/vigenere_stage.h"
 #include "src/stages/xor_cbc_stage.h"
 #include "src/stages/xor_stage.h"
 
-// 新增打包算法时在这里加 include：
-// #include "src/packers/tar_packer.h"      // 队友 A
-// #include "src/packers/cpio_packer.h"     // 队友 A
 
 // 新增 Stage 时在这里加 include：
-// #include "stages/huffman_stage.h"    // 队友 A
-// #include "stages/lz77_stage.h"       // 队友 A
-// #include "stages/xor_stage.h"        // 队友 B
 // #include "stages/aes_stage.h"        // 队友 B
 
 namespace cbk {
@@ -35,17 +32,17 @@ void RegisterBuiltinPackers() {
     PackerRegistry& registry = PackerRegistry::Instance();
 
     registry.Register(kNativePackerName, [] { return std::make_unique<NativePacker>(); });
-    // registry.Register("tar",  [] { return std::make_unique<TarPacker>(); });
-    // registry.Register("cpio", [] { return std::make_unique<CpioPacker>(); });
+    registry.Register("tar", [] { return std::make_unique<TarPacker>(); });
+    registry.Register("cpio", [] { return std::make_unique<CpioPacker>(); });
 }
 
 void RegisterBuiltinStages() {
     StageRegistry& registry = StageRegistry::Instance();
+    registry.Register(std::make_unique<HuffmanStageFactory>());
+    registry.Register(std::make_unique<Lz77StageFactory>());
     registry.Register(std::make_unique<XorStageFactory>());
     registry.Register(std::make_unique<VigenereStageFactory>());
     registry.Register(std::make_unique<XorCbcStageFactory>());
-    // registry.Register(std::make_unique<HuffmanStageFactory>());
-    // registry.Register(std::make_unique<Lz77StageFactory>());
     // registry.Register(std::make_unique<AesStageFactory>());
 }
 

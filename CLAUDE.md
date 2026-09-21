@@ -246,4 +246,21 @@ docs/                    需求 / 设计 / 测试三份文档
 
 <!-- 队友 A（打包解包 / 压缩解压）：在此追加 -->
 
+### 队友 A：tar 打包解包
+
+`TarPacker` 位于 `code/core/src/packers/tar_packer.*`，注册名为 `tar`。
+采用 ustar + 逐条目 PAX，完整 EntryMeta 放在 `CBK.meta` 扩展键；
+内容流式处理，文件实际长度必须等于声明长度，否则抛异常。
+测试在 `tar_packer_test.cpp`，外部兼容性检查用 `scripts/test_tar_compat.ps1`。
+实现范围、大小变化限制与演示方法见 [tar 开发说明](docs/tar开发说明.md)。
+`CpioPacker` 位于 `code/core/src/packers/cpio_packer.*`，注册名为 `cpio`，
+采用 SVR4 newc 和逐条目元数据辅助记录。单文件上限、保留命名空间、
+硬链接计数策略及验证方法见 [CPIO 格式说明](docs/cpio格式说明.md)。
+`HuffmanStageFactory` 位于 `code/core/src/stages/huffman_stage.*`，注册名 `huffman`。
+采用 64 KB 分块 Huffman、频率表序列化、原样回退及逐块 CRC32；支持流式压缩和解压。
+格式与验证范围见 [Huffman 格式说明](docs/huffman格式说明.md)。
+`Lz77StageFactory` 位于 `code/core/src/stages/lz77_stage.*`，注册名 `lz77`。
+采用 64 KB 独立块、32 KB 窗口及 LZSS token；支持原样回退和逐块 CRC32。
+格式、搜索上限及组合能力见 [LZ77 格式说明](docs/lz77格式说明.md)。
+
 <!-- 队友 B（加密解密 / 图形界面）：在此追加 -->

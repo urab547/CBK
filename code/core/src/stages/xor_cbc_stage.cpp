@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cstring>
 #include <random>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -47,14 +48,15 @@ void XorCbcStage::Process(const uint8_t* data, size_t len, ISink& out) {
 
     // if inverse and IV not read yet, buffer until we have IV
     if (!wrote_iv_ && inverse_) {
-        buffer_.insert(buffer_.end(), data, data + len);
+        if (len > 0) buffer_.insert(buffer_.end(), data, data + len);
         if (buffer_.size() >= kBlockSize) {
             std::copy(buffer_.begin(), buffer_.begin() + kBlockSize, prev_block_.begin());
             std::vector<uint8_t> tail(buffer_.begin() + kBlockSize, buffer_.end());
             buffer_.swap(tail);
             wrote_iv_ = true;
         }
-        return;
+        if (!wrote_iv_) return;
+        len = 0;  // 本次输入已进入 buffer_，继续处理 IV 后的密文，不重复追加。
     }
 
     if (len > 0) buffer_.insert(buffer_.end(), data, data + len);
@@ -76,8 +78,11 @@ void XorCbcStage::Process(const uint8_t* data, size_t len, ISink& out) {
             XorBlock(temp, in_block, prev_block_.data());
             for (size_t i = 0; i < kBlockSize; ++i)
                 out_block[i] = static_cast<uint8_t>(temp[i] ^ key_block_[i]);
-            // append decrypted plaintext to plain_out_buffer_ for padding removal later
-            plain_out_buffer_.insert(plain_out_buffer_.end(), out_block, out_block + kBlockSize);
+            // 只保留最后一个明文块用于去填充；前一块现在可以流式交付下游。
+            if (!plain_out_buffer_.empty()) {
+                out.Write(plain_out_buffer_.data(), plain_out_buffer_.size());
+            }
+            plain_out_buffer_.assign(out_block, out_block + kBlockSize);
             std::copy(in_block, in_block + kBlockSize, prev_block_.begin());
         }
 
@@ -86,7 +91,11 @@ void XorCbcStage::Process(const uint8_t* data, size_t len, ISink& out) {
 }
 
 void XorCbcStage::Finish(ISink& out) {
-    if (!wrote_iv_ && inverse_) return;  // nothing to do
+    // 空明文也需要 IV；逆向则处理尚未消费的完整密文块。
+    Process(nullptr, 0, out);
+    if (inverse_ && (!wrote_iv_ || !buffer_.empty() || plain_out_buffer_.empty())) {
+        throw std::runtime_error("xor-cbc: truncated ciphertext");
+    }
 
     if (!inverse_) {
         size_t pad = kBlockSize - buffer_.size();
@@ -109,13 +118,9 @@ void XorCbcStage::Finish(ISink& out) {
         buffer_.clear();
     } else {
         // inverse: remove PKCS#7 padding from plain_out_buffer_ and write trimmed plaintext
-        if (plain_out_buffer_.empty()) return;
         uint8_t pad = plain_out_buffer_.back();
         if (pad == 0 || pad > kBlockSize) {
-            // invalid padding, write all
-            out.Write(plain_out_buffer_.data(), plain_out_buffer_.size());
-            plain_out_buffer_.clear();
-            return;
+            throw std::runtime_error("xor-cbc: invalid padding");
         }
         size_t plain_size = plain_out_buffer_.size();
         bool ok = true;
@@ -126,9 +131,7 @@ void XorCbcStage::Finish(ISink& out) {
             }
         }
         if (!ok) {
-            out.Write(plain_out_buffer_.data(), plain_out_buffer_.size());
-            plain_out_buffer_.clear();
-            return;
+            throw std::runtime_error("xor-cbc: invalid padding");
         }
         size_t write_len = plain_size - pad;
         if (write_len > 0) out.Write(plain_out_buffer_.data(), write_len);
