@@ -6,6 +6,7 @@
 
 #include <cstdint>
 #include <string>
+#include <vector>
 
 #include <gtest/gtest.h>
 
@@ -355,6 +356,102 @@ TEST(Security, NoMetadataSkipsAclRestore) {
 
     EXPECT_EQ("内容", temp.ReadFile(L"back\\a.txt")) << "内容照样要还原";
     EXPECT_FALSE(IsDaclProtected(temp.At(L"back\\a.txt"))) << "--no-metadata 时不该把 ACL 写回去";
+}
+
+// ---- 属主"本来就对"时不该误报 ----
+//
+// 下面两条钉住的是一个真实的误报：非提权用户还原自己的文件，每个条目都报
+// "属主和属组未还原"，可实际核对下来属主、属组、DACL 跟源文件一模一样。
+//
+// 根因：设属主要的是目标上的 WRITE_OWNER 访问权。非提权用户在 D 盘这类
+// 位置通常只有"修改"权限，不含 WRITE_OWNER——哪怕要设的属主就是他自己、
+// 也就是文件现在的属主，调用照样被拒。
+//
+// 临时目录在用户自己的 profile 下，那里对自己的文件是完全控制，这个 bug
+// 根本不会出现。所以测试要先人为造出那种环境：属主是自己，但只给"修改"。
+
+namespace {
+
+/// "修改"权限：读、写、执行、删除，**不含** WRITE_DAC 和 WRITE_OWNER。
+/// 就是 D 盘根目录默认给"已验证用户"的那一档。
+constexpr char kModifyOnly[] = "0x1301bf";
+
+}  // namespace
+
+TEST(Security, OwnerAlreadyCorrectIsNotReportedAsSkipped) {
+    cbk_test::TempDir temp;
+    const std::wstring file = temp.MakeFile(L"a.txt", "内容");
+
+    // 收紧成"我是属主、但只有修改权限"。属主自带 READ_CONTROL 和 WRITE_DAC，
+    // 所以后面还能读写 DACL，唯独改不了属主。
+    bool owner_skipped = false;
+    uint32_t error = 0;
+    const std::string restrictive = std::string("D:P(A;;FA;;;SY)(A;;") + kModifyOnly + ";;;AU)";
+    ASSERT_TRUE(cbk::ApplySecurityDescriptor(file, restrictive, &owner_skipped, &error));
+
+    // 读出完整描述符（带 O: G: 两段），原样套回去。属主属组一个字都没变，
+    // 应该一声不吭地成功。
+    const std::string desired = SddlOf(file);
+    ASSERT_NE(std::string::npos, desired.find("O:")) << desired;
+
+    owner_skipped = false;
+    EXPECT_TRUE(cbk::ApplySecurityDescriptor(file, desired, &owner_skipped, &error))
+        << "Win32 错误 " << error;
+    EXPECT_FALSE(owner_skipped) << "属主本来就对，却被报成了「属主未还原」";
+    EXPECT_EQ(desired, SddlOf(file));
+}
+
+TEST(Security, RestoringOwnFilesProducesNoOwnerWarnings) {
+    // 端到端复现用户看到的症状：还原到一个"只给修改权限"的目标目录下。
+    cbk::RegisterBuiltinPackers();
+    cbk_test::TempDir temp;
+    temp.MakeDir(L"src");
+    temp.MakeFile(L"src\\a.txt", "内容");
+    temp.MakeDir(L"src\\子目录");
+    temp.MakeFile(L"src\\子目录\\b.txt", "内容");
+
+    cbk::BackupOptions backup;
+    backup.source_root = temp.At(L"src");
+    backup.dest_archive = temp.At(L"o.cbk");
+    ASSERT_EQ(cbk::Status::kOk, cbk::RunBackup(backup, nullptr).status);
+
+    // 目标目录的权限设成可继承的"只给修改"，还原出来的每个条目一开始都会
+    // 继承这一档——跟在 D 盘上还原时一模一样。
+    const std::wstring back = temp.MakeDir(L"back");
+    bool owner_skipped = false;
+    uint32_t error = 0;
+    const std::string inheritable =
+        std::string("D:P(A;OICI;FA;;;SY)(A;OICI;") + kModifyOnly + ";;;AU)";
+    ASSERT_TRUE(cbk::ApplySecurityDescriptor(back, inheritable, &owner_skipped, &error));
+
+    class WarnRecorder : public cbk::IProgressObserver {
+    public:
+        void OnWarn(const cbk::WarnInfo& info) override {
+            messages.push_back(cbk::ToUtf8(info.path + L"：" + info.message));
+        }
+        std::vector<std::string> messages;
+    };
+    WarnRecorder observer;
+
+    cbk::RestoreOptions restore;
+    restore.archive = temp.At(L"o.cbk");
+    restore.dest_root = back;
+    restore.overwrite = cbk::OverwritePolicy::kForce;
+    const cbk::EngineResult result = cbk::RunRestore(restore, &observer);
+
+    EXPECT_EQ(cbk::Status::kOk, result.status);
+    for (const std::string& message : observer.messages) {
+        ADD_FAILURE() << "不该有的告警：" << message;
+    }
+
+    // 属主确实是对的——不是靠"不报告警"蒙混过去的。
+    // SDDL 里 D: 之前的部分就是 O:属主 G:属组。
+    const auto owner_and_group = [](const std::string& sddl) {
+        return sddl.substr(0, sddl.find("D:"));
+    };
+    EXPECT_EQ(owner_and_group(SddlOf(temp.At(L"src\\a.txt"))),
+              owner_and_group(SddlOf(temp.At(L"back\\a.txt"))))
+        << "还原后的属主 / 属组跟源文件不一样";
 }
 
 }  // namespace

@@ -112,6 +112,14 @@ private:
     T value_ = nullptr;
 };
 
+/// 两个 SID 是否指同一个账户。任何一边为空或无效都算"不同"——
+/// 调用方据此决定要不要去设，判成"不同"的代价只是多试一次，安全。
+bool SameSid(PSID a, PSID b) {
+    if (a == nullptr || b == nullptr) return false;
+    if (IsValidSid(a) == 0 || IsValidSid(b) == 0) return false;
+    return EqualSid(a, b) != 0;
+}
+
 /// 我们关心的三段。SACL 不读——那要 SeSecurityPrivilege，且与评分项无关。
 constexpr SECURITY_INFORMATION kSections =
     OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION;
@@ -163,7 +171,32 @@ bool ApplySecurityDescriptor(const std::wstring& path, const std::string& sddl, 
     GetSecurityDescriptorGroup(descriptor.Get(), &group, &defaulted);
     GetSecurityDescriptorDacl(descriptor.Get(), &dacl_present, &dacl, &defaulted);
 
-    // 只设 SDDL 里真有的段。传了 OWNER_SECURITY_INFORMATION 却给个空属主，
+    const std::wstring extended = platform::ToExtendedPath(path);
+
+    // 属主、属组已经是对的就别去设。
+    //
+    // 设属主要的是目标上的 WRITE_OWNER 访问权（或 SeRestorePrivilege），
+    // 跟"要设成谁"无关。非提权用户在 D 盘这类位置通常只有"修改"权限，
+    // 不含 WRITE_OWNER——哪怕要设的属主就是他自己、也正是文件现在的属主，
+    // 调用照样被拒。结果在最常见的场景（自己还原自己的文件）里，每个条目
+    // 都白白失败一次、退回只设 DACL、再报一条"属主未还原"，而属主其实
+    // 一直是对的。
+    //
+    // 读不到现状就当作"不一样"，照常去设：宁可多试一次，不能因为读失败漏设。
+    {
+        LocalPtr<PSECURITY_DESCRIPTOR> current;
+        PSID current_owner = nullptr;
+        PSID current_group = nullptr;
+        if (GetNamedSecurityInfoW(extended.c_str(), SE_FILE_OBJECT,
+                                  OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION,
+                                  &current_owner, &current_group, nullptr, nullptr,
+                                  current.Receive()) == ERROR_SUCCESS) {
+            if (SameSid(owner, current_owner)) owner = nullptr;
+            if (SameSid(group, current_group)) group = nullptr;
+        }
+    }
+
+    // 只设 SDDL 里真有的、而且确实需要改的段。传了 OWNER_SECURITY_INFORMATION 却给个空属主，
     // 整个调用会失败——连带 DACL 也设不上。
     SECURITY_INFORMATION sections = 0;
     if (owner != nullptr) sections |= OWNER_SECURITY_INFORMATION;
@@ -184,7 +217,6 @@ bool ApplySecurityDescriptor(const std::wstring& path, const std::string& sddl, 
                                      : UNPROTECTED_DACL_SECURITY_INFORMATION;
     }
 
-    const std::wstring extended = platform::ToExtendedPath(path);
     DWORD status = SetNamedSecurityInfoW(const_cast<LPWSTR>(extended.c_str()), SE_FILE_OBJECT,
                                          sections | inheritance, owner, group, dacl, nullptr);
     if (status == ERROR_SUCCESS) return true;

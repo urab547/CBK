@@ -224,10 +224,11 @@ void ApplyEntryMetadata(const std::wstring& absolute, const EntryMeta& entry,
         Warn(observer, entry.relative_path, L"权限设置失败：" + platform::FormatWinError(error),
              error);
     } else if (owner_skipped) {
-        // 设属主要 SeRestorePrivilege。拿不到就只还原 DACL，这是普通用户
-        // 运行时的正常情况，说清楚就行。
+        // 走到这里说明属主或属组跟源文件**确实不同**（相同的早在
+        // ApplySecurityDescriptor 里跳过了），而当前身份没有改它的权限。
+        // 典型场景是还原别人的文件，或者跨机器还原。只还原了 DACL，说清楚就行。
         Warn(observer, entry.relative_path,
-             L"没有 SeRestorePrivilege，属主和属组未还原（DACL 已还原）。"
+             L"属主或属组跟源文件不同，当前权限不够修改，已跳过（DACL 已还原）。"
              L"以管理员身份运行可以完整还原",
              error);
     }
