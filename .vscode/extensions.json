@@ -1,0 +1,7 @@
+{
+    // 打开这个项目时，VS Code 会提示安装下面这些扩展。
+    "recommendations": [
+        "ms-vscode.cpptools",
+        "ms-vscode.cmake-tools"
+    ]
+}

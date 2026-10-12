@@ -1,0 +1,93 @@
+{
+    // CBK 的调试配置。
+    //
+    // 用法：左边栏点「运行和调试」（或 Ctrl+Shift+D），顶上下拉框选一项，按 F5。
+    // 会先自动构建 Debug 版，再在调试器里启动。
+    //
+    // 按 ①→②→③ 的顺序走一遍，就是一次完整的"备份 → 还原"：
+    //   ② 备份前会自动重建演示目录 code/build/demo/src
+    //   ③ 还原前会自动清空上次的还原结果 code/build/demo/back
+    //
+    // 调试时程序输出的 JSON 事件在下方「终端」面板里。
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "① cbk info（查询支持的算法）",
+            "type": "cppvsdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/code/build/msvc/bin/Debug/cbk.exe",
+            "args": ["info"],
+            "cwd": "${workspaceFolder}/code",
+            "console": "integratedTerminal",
+            "preLaunchTask": "cbk: 构建 Debug"
+        },
+        {
+            "name": "② cbk backup（备份演示目录）",
+            "type": "cppvsdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/code/build/msvc/bin/Debug/cbk.exe",
+            "args": [
+                "backup",
+                "--source", "${workspaceFolder}/code/build/demo/src",
+                "--dest", "${workspaceFolder}/code/build/demo/out.cbk",
+                "--progress", "json"
+            ],
+            "cwd": "${workspaceFolder}/code",
+            "console": "integratedTerminal",
+            "preLaunchTask": "cbk: 调试备份之前"
+        },
+        {
+            "name": "③ cbk restore（还原到 demo/back）",
+            "type": "cppvsdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/code/build/msvc/bin/Debug/cbk.exe",
+            "args": [
+                "restore",
+                "--archive", "${workspaceFolder}/code/build/demo/out.cbk",
+                "--dest", "${workspaceFolder}/code/build/demo/back",
+                "--progress", "json"
+            ],
+            "cwd": "${workspaceFolder}/code",
+            "console": "integratedTerminal",
+            "preLaunchTask": "cbk: 调试还原之前"
+        },
+        {
+            "name": "④ cbk list（看备份包里有什么）",
+            "type": "cppvsdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/code/build/msvc/bin/Debug/cbk.exe",
+            "args": ["list", "--archive", "${workspaceFolder}/code/build/demo/out.cbk"],
+            "cwd": "${workspaceFolder}/code",
+            "console": "integratedTerminal",
+            "preLaunchTask": "cbk: 构建 Debug"
+        },
+        {
+            "name": "⑤ cbk verify（校验备份包）",
+            "type": "cppvsdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/code/build/msvc/bin/Debug/cbk.exe",
+            "args": ["verify", "--archive", "${workspaceFolder}/code/build/demo/out.cbk"],
+            "cwd": "${workspaceFolder}/code",
+            "console": "integratedTerminal",
+            "preLaunchTask": "cbk: 构建 Debug"
+        },
+        {
+            "name": "⑥ 单元测试（按名字挑，支持通配符）",
+            "type": "cppvsdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/code/build/msvc/bin/Debug/cbk_tests.exe",
+            "args": ["--gtest_filter=${input:gtestFilter}"],
+            "cwd": "${workspaceFolder}/code",
+            "console": "integratedTerminal",
+            "preLaunchTask": "cbk: 构建 Debug"
+        }
+    ],
+    "inputs": [
+        {
+            "id": "gtestFilter",
+            "type": "promptString",
+            "description": "要跑哪些测试？例：Engine.*  /  Scanner.*  /  FileType.HardlinksAreDeduplicatedAndRestoredAsLinks  /  *（全部）",
+            "default": "Engine.RoundTripsContentAndMetadata"
+        }
+    ]
+}

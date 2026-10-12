@@ -1,0 +1,80 @@
+{
+    // CBK 的构建任务。
+    //
+    // Ctrl+Shift+B      构建 Debug 版（默认任务）
+    // 终端 → 运行任务   能看到下面所有任务
+    //
+    // 别用编辑器右上角那个 ▶「运行 C/C++ 文件」：它只编译当前这一个 .cpp，
+    // 对这种多文件 + CMake 的项目永远报"找不到头文件"。
+    "version": "2.0.0",
+    "options": {
+        "cwd": "${workspaceFolder}/code",
+        // -NoProfile：跳过个人 PowerShell 配置，每个任务能快好几秒
+        "shell": {
+            "executable": "powershell.exe",
+            "args": ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command"]
+        }
+    },
+    "tasks": [
+        {
+            "label": "cbk: 配置",
+            "detail": "cmake --preset msvc（第一次、或改了 CMakeLists.txt 之后）",
+            "type": "shell",
+            "command": "cmake --preset msvc",
+            "problemMatcher": []
+        },
+        {
+            "label": "cbk: 构建 Debug",
+            "detail": "调试用，带完整符号，断点才停得住",
+            "type": "shell",
+            "command": "cmake --build --preset debug",
+            "dependsOn": "cbk: 配置",
+            "group": { "kind": "build", "isDefault": true },
+            "problemMatcher": "$msCompile"
+        },
+        {
+            "label": "cbk: 构建 Release",
+            "detail": "交付和演示用，优化过，跑得快但不好调试",
+            "type": "shell",
+            "command": "cmake --build --preset release",
+            "dependsOn": "cbk: 配置",
+            "group": "build",
+            "problemMatcher": "$msCompile"
+        },
+        {
+            "label": "cbk: 跑全部测试",
+            "type": "shell",
+            "command": "ctest --preset debug",
+            "dependsOn": "cbk: 构建 Debug",
+            "group": { "kind": "test", "isDefault": true },
+            "problemMatcher": []
+        },
+        {
+            "label": "cbk: 生成演示目录",
+            "detail": "重建 code/build/demo/src，并清掉上次的备份包和还原结果",
+            "type": "shell",
+            "command": "& '${workspaceFolder}/scripts/demo_tree.ps1'",
+            "problemMatcher": []
+        },
+        {
+            "label": "cbk: 清空还原目录",
+            "type": "shell",
+            "command": "& '${workspaceFolder}/scripts/demo_tree.ps1' -CleanRestore",
+            "problemMatcher": []
+        },
+
+        // ---- 下面两个是给 F5 调试用的组合任务，launch.json 会调用 ----
+        {
+            "label": "cbk: 调试备份之前",
+            "dependsOn": ["cbk: 构建 Debug", "cbk: 生成演示目录"],
+            "dependsOrder": "sequence",
+            "problemMatcher": []
+        },
+        {
+            "label": "cbk: 调试还原之前",
+            "dependsOn": ["cbk: 构建 Debug", "cbk: 清空还原目录"],
+            "dependsOrder": "sequence",
+            "problemMatcher": []
+        }
+    ]
+}

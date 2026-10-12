@@ -1,0 +1,29 @@
+{
+    // 编辑器里的代码提示（IntelliSense）配置。
+    //
+    // 有了它，#include "cbk/engine.h" 下面不会再有红波浪线，
+    // 按住 Ctrl 点函数名能跳到定义。
+    //
+    // 优先让 CMake Tools 扩展把 CMakeLists.txt 里的设置告诉编辑器
+    // （configurationProvider）；下面的 includePath 和 defines 是兜底，
+    // 扩展还没配置好的时候也能用。两边要保持一致：
+    //   includePath  对应 CMakeLists.txt 里的 target_include_directories
+    //   defines      对应顶层 CMakeLists.txt 里的 add_compile_definitions
+    "configurations": [
+        {
+            "name": "cbk (MSVC x64)",
+            "configurationProvider": "ms-vscode.cmake-tools",
+            "includePath": [
+                "${workspaceFolder}/code/core/include",
+                "${workspaceFolder}/code/core",
+                "${workspaceFolder}/code/tests",
+                "${workspaceFolder}/code/build/msvc/_deps/googletest-src/googletest/include"
+            ],
+            "defines": ["UNICODE", "_UNICODE", "NOMINMAX", "WIN32_LEAN_AND_MEAN"],
+            "cStandard": "c17",
+            "cppStandard": "c++17",
+            "intelliSenseMode": "windows-msvc-x64"
+        }
+    ],
+    "version": 4
+}
