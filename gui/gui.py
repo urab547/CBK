@@ -9,21 +9,25 @@
 
 from __future__ import annotations
 
+import math
 import sys
 import threading
 import time
 import traceback
+from collections import deque
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from PySide6.QtCore import QObject, Qt, QTimer, Signal
+from PySide6.QtCore import QObject, QSize, Qt, QTimer, Signal
+from PySide6.QtGui import QColor, QIcon, QIconEngine, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
     QComboBox,
     QFileDialog,
     QFormLayout,
+    QFrame,
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -33,12 +37,178 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QProgressBar,
     QPushButton,
-    QTabWidget,
+    QScrollArea,
+    QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
 
 import bridge
+
+STYLE = """
+QWidget { color: #24344d; font-family: 'Microsoft YaHei UI', 'Microsoft YaHei';
+          font-size: 13px; }
+QMainWindow, QWidget#workspace { background: #f3f6fb; }
+QFrame#sidebar { background: #142942; }
+QLabel#brand { color: white; font-size: 28px; font-weight: 700; }
+QLabel#sideNote { color: #a8bbd2; font-size: 12px; }
+QPushButton[nav="true"] { background: transparent; color: #c7d5e7; border: none;
+    text-align: left; padding: 14px 16px; border-radius: 8px; }
+QPushButton[nav="true"]:hover { background: #203b5b; }
+QPushButton[nav="true"]:checked { background: #2b5280; color: white; font-weight: 600; }
+QLabel#pageTitle { font-size: 25px; font-weight: 700; color: #182c49; }
+QLabel#subtitle { color: #6a7c94; }
+QGroupBox { background: white; border: 1px solid #dfe6ef; border-radius: 10px;
+    margin-top: 14px; padding: 22px 16px 14px; font-weight: 600; }
+QGroupBox::title { subcontrol-origin: margin; left: 18px; top: 4px;
+    background: white; padding: 0 7px; }
+QLineEdit, QComboBox { background: #fbfcfe; border: 1px solid #d7e0ec;
+    border-radius: 6px; padding: 8px 10px; min-height: 18px; }
+QLineEdit:focus, QComboBox:focus { border: 1px solid #377ed0; background: white; }
+QLineEdit:disabled { background: #edf1f6; color: #8995a6; border-color: #e3e8ef; }
+QComboBox::drop-down { border: none; width: 26px; }
+QComboBox::down-arrow { image: none; }
+QComboBox QAbstractItemView { background: white; selection-background-color: #e4efff;
+    selection-color: #203a60; padding: 4px; }
+QPushButton { background: white; border: 1px solid #d4deea; border-radius: 6px;
+    padding: 9px 16px; font-weight: 600; }
+QPushButton:hover { background: #edf4ff; border-color: #8aadd9; }
+QPushButton:pressed { background: #dbe9fb; }
+QPushButton:focus { border: 1px solid #377ed0; }
+QPushButton[primary="true"] { background: #2566bb; color: white; border-color: #2566bb; }
+QPushButton[primary="true"]:hover { background: #1d559e; }
+QPushButton:disabled { background: #edf1f6; border-color: #e2e7ef; color: #96a2b2; }
+QCheckBox { spacing: 8px; padding: 4px 0; }
+QProgressBar { border: none; border-radius: 6px; background: #eaf0f7;
+    min-height: 24px; text-align: center; color: #193758; }
+QProgressBar::chunk { background: #8bb7f0; border-radius: 6px; }
+QLabel#badge { border-radius: 5px; padding: 5px 12px; font-weight: 600; }
+QLabel#badge[state="idle"] { background: #edf1f6; color: #52657d; }
+QLabel#badge[state="running"] { background: #e6f0ff; color: #225fa9; }
+QLabel#badge[state="success"] { background: #e4f4ec; color: #216b49; }
+QLabel#badge[state="warning"] { background: #fff2d7; color: #895c15; }
+QLabel#badge[state="error"] { background: #fdeaea; color: #a63232; }
+QLabel#badge[state="cancelled"] { background: #eeeaf8; color: #6d548c; }
+QPlainTextEdit { background: #f8fafd; border: 1px solid #e1e7ef; border-radius: 7px;
+    padding: 10px; selection-background-color: #c5dcfa; }
+QScrollArea { border: none; background: transparent; }
+QScrollBar:vertical { background: #eef2f7; width: 10px; margin: 0; }
+QScrollBar::handle:vertical { background: #bbc9da; min-height: 30px; border-radius: 5px; }
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
+"""
+
+
+class LineIcon(QIconEngine):
+    """Resolution-independent outline icons painted by Qt at the target DPI."""
+
+    def __init__(self, kind: str):
+        super().__init__()
+        self.kind = kind
+
+    def clone(self):
+        return LineIcon(self.kind)
+
+    def pixmap(self, size, mode, state):
+        pixmap = QPixmap(size)
+        pixmap.fill(Qt.transparent)
+        painter = QPainter(pixmap)
+        self.paint(painter, pixmap.rect(), mode, state)
+        painter.end()
+        return pixmap
+
+    def paint(self, painter, rect, mode, state):
+        painter.save()
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.translate(rect.x(), rect.y())
+        painter.scale(rect.width() / 24, rect.height() / 24)
+        painter.setPen(QPen(QColor("#c7d9ef"), 1.7, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        painter.drawRoundedRect(3, 4, 18, 16, 3, 3)
+        if self.kind == "inspect":
+            painter.drawEllipse(7, 8, 7, 7)
+            painter.drawLine(14, 15, 18, 18)
+        else:
+            upward = self.kind == "backup"
+            tip, tail = (8, 17) if upward else (17, 8)
+            painter.drawLine(12, tip, 12, tail)
+            painter.drawLine(8, tip + (4 if upward else -4), 12, tip)
+            painter.drawLine(16, tip + (4 if upward else -4), 12, tip)
+        painter.restore()
+
+
+class SelectionBox(QComboBox):
+    """Keep the dropdown affordance visible across native and offscreen styles."""
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setPen(QPen(QColor("#607590"), 1.5, Qt.SolidLine, Qt.RoundCap))
+        x, y = self.width() - 17, self.height() // 2
+        painter.drawLine(x - 4, y - 2, x, y + 2)
+        painter.drawLine(x, y + 2, x + 4, y - 2)
+
+
+class PageStack(QWidget):
+    """A page container whose hidden forms do not reserve layout space."""
+
+    def __init__(self):
+        super().__init__()
+        self._pages: list[QWidget] = []
+        self._index = 0
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+    def addWidget(self, page: QWidget) -> None:
+        self._pages.append(page)
+        self.layout().addWidget(page)
+        page.setVisible(len(self._pages) == 1)
+
+    def widget(self, index: int) -> QWidget:
+        return self._pages[index]
+
+    def currentWidget(self) -> QWidget:
+        return self.widget(self._index)
+
+    def currentIndex(self) -> int:
+        return self._index
+
+    def setCurrentIndex(self, index: int) -> None:
+        self._index = index
+        for i, page in enumerate(self._pages):
+            page.setVisible(i == index)
+        self.layout().invalidate()
+
+
+def _card(title: str, layout) -> QGroupBox:
+    card = QGroupBox(title)
+    layout.setSpacing(12)
+    card.setLayout(layout)
+    return card
+
+
+def _field(title: str, widget: QWidget) -> QVBoxLayout:
+    layout = QVBoxLayout()
+    layout.setSpacing(6)
+    layout.addWidget(QLabel(title))
+    layout.addWidget(widget)
+    return layout
+
+
+def _page_layout(page: QWidget, title: str, description: str) -> QVBoxLayout:
+    layout = QVBoxLayout(page)
+    layout.setContentsMargins(0, 0, 0, 0)
+    layout.setSpacing(14)
+    layout.setAlignment(Qt.AlignTop)
+    heading = QLabel(title)
+    heading.setObjectName("pageTitle")
+    subtitle = QLabel(description)
+    subtitle.setObjectName("subtitle")
+    subtitle.setWordWrap(True)
+    layout.addWidget(heading)
+    layout.addWidget(subtitle)
+    return layout
+
 
 # ============================================================ 线程桥
 
@@ -84,16 +254,17 @@ class BackupTab(QWidget):
         self.dest_edit.setPlaceholderText("归档保存位置，例如 D:\\backup.cbk")
 
         # ---- 打包器 / 压缩（回到主表单） ----
-        self.packer_box = QComboBox()
+        self.packer_box = SelectionBox()
         self.packer_box.addItems(algs.get("packers") or ["cbk-native"])
 
-        self.compress_box = QComboBox()
+        self.compress_box = SelectionBox()
         self.compress_box.addItem("不压缩", userData=None)
         for name in algs.get("compressors", []):
             self.compress_box.addItem(name, userData=name)
 
         # ---- 加密 ----
-        self.encrypt_box = QComboBox()
+        self.encrypt_box = SelectionBox()
+        self.encrypt_box.addItem("不加密", userData=None)
         for name in algs.get("ciphers", []):
             self.encrypt_box.addItem(name, userData=name)
 
@@ -135,30 +306,36 @@ class BackupTab(QWidget):
         form = QFormLayout()
         form.addRow("源目录：", src_row)
         form.addRow("保存到：", dst_row)
-        form.addRow("打包器：", self.packer_box)
-        form.addRow("压缩：", self.compress_box)
-        form.addRow("加密：", self.encrypt_box)
-        form.addRow("密码：", self.password_edit)
-        form.addRow("确认密码", self.confirm_password)
-
-        box = QGroupBox("备份参数")
-        box.setLayout(form)
+        algorithms = QHBoxLayout()
+        algorithms.addLayout(_field("打包格式", self.packer_box), 1)
+        algorithms.addLayout(_field("压缩方式", self.compress_box), 1)
+        algorithms.addLayout(_field("加密方式", self.encrypt_box), 1)
+        passwords = QHBoxLayout()
+        passwords.addLayout(_field("密码", self.password_edit), 1)
+        passwords.addLayout(_field("确认密码", self.confirm_password), 1)
+        self.confirm_password.setPlaceholderText("再次输入密码")
+        options = QVBoxLayout()
+        options.addLayout(algorithms)
+        options.addLayout(passwords)
+        options.addWidget(self.advanced_toggle)
+        options.addWidget(self.advanced_panel)
 
         self.run_btn = QPushButton("开始备份")
+        self.run_btn.setProperty("primary", True)
         self.run_btn.clicked.connect(self._on_click)
 
-        layout = QVBoxLayout(self)
-        layout.addWidget(box)
-        layout.addWidget(self.advanced_toggle)
-        layout.addWidget(self.advanced_panel)
-        layout.addWidget(self.run_btn)
-        layout.addStretch(1)
+        layout = _page_layout(self, "创建备份", "选择需要保护的文件夹，将文件保存为一个备份归档。")
+        layout.addWidget(_card("文件位置", form))
+        layout.addWidget(_card("归档与加密选项", options))
+        layout.addWidget(self.run_btn, 0, Qt.AlignRight)
 
     def _sync_password(self) -> None:
         encrypted = self.encrypt_box.currentData() is not None
         self.password_edit.setEnabled(encrypted)
+        self.confirm_password.setEnabled(encrypted)
         if not encrypted:
             self.password_edit.clear()
+            self.confirm_password.clear()
 
     def _pick_source(self) -> None:
         d = QFileDialog.getExistingDirectory(self, "选择源目录")
@@ -183,9 +360,6 @@ class BackupTab(QWidget):
             return
 
         encrypt = self.encrypt_box.currentData()
-        if not encrypt:
-            QMessageBox.warning(self, "加密", "没有可用的加密算法")
-            return
         if not Path(source).is_dir():
             QMessageBox.warning(self, "源目录", "源目录不存在")
             return
@@ -203,7 +377,7 @@ class BackupTab(QWidget):
         if target.is_dir() or not target.parent.is_dir():
             QMessageBox.warning(self, "保存位置错误", "目标必须是文件路径，且上级目录必须存在。")
             return
-        if self.password_edit.text() != self.confirm_password.text():
+        if encrypt and self.password_edit.text() != self.confirm_password.text():
             QMessageBox.warning(self, "密码", "两次输入的密码不一致")
             return
         if (
@@ -248,7 +422,7 @@ class RestoreTab(QWidget):
 
         self.archive_edit = QLineEdit()
         self.dest_edit = QLineEdit()
-        self.overwrite_box = QComboBox()
+        self.overwrite_box = SelectionBox()
         self.overwrite_box.addItem("跳过已存在", userData="skip")
         self.overwrite_box.addItem("覆盖", userData="force")
         self.overwrite_box.addItem("重命名", userData="rename")
@@ -281,14 +455,15 @@ class RestoreTab(QWidget):
         form.addRow("密码：", self.password_edit)
 
         self.run_btn = QPushButton("开始恢复")
+        self.run_btn.setProperty("primary", True)
         self.run_btn.clicked.connect(self._on_click)
 
-        box = QGroupBox("恢复参数")
-        box.setLayout(form)
-        layout = QVBoxLayout(self)
-        layout.addWidget(box)
-        layout.addWidget(self.run_btn)
-        layout.addStretch(1)
+        self.archive_edit.setPlaceholderText("选择需要恢复的 .cbk 归档")
+        self.dest_edit.setPlaceholderText("选择文件恢复到的目录")
+        self.password_edit.setPlaceholderText("加密归档请填写密码")
+        layout = _page_layout(self, "恢复文件", "从备份归档还原文件，并选择已存在文件的处理方式。")
+        layout.addWidget(_card("恢复选项", form))
+        layout.addWidget(self.run_btn, 0, Qt.AlignRight)
 
     def _pick_archive(self) -> None:
         f, _ = QFileDialog.getOpenFileName(
@@ -368,12 +543,15 @@ class InspectTab(QWidget):
         btns.addWidget(verify_btn)
         btns.addStretch(1)
 
-        box = QGroupBox("归档检查")
-        box.setLayout(form)
-        layout = QVBoxLayout(self)
-        layout.addWidget(box)
+        self.archive_edit.setPlaceholderText("选择需要检查的 .cbk 归档")
+        self.password_edit.setPlaceholderText("查看加密归档的内容时填写")
+        layout = _page_layout(self, "查看与校验", "浏览归档内容，或检查备份容器的完整性。")
+        layout.addWidget(_card("归档信息", form))
+        hint = QLabel("校验完整性检查容器数据；确认密码和文件可恢复性，请执行恢复。")
+        hint.setObjectName("subtitle")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
         layout.addLayout(btns)
-        layout.addStretch(1)
 
     def _pick_archive(self) -> None:
         f, _ = QFileDialog.getOpenFileName(
@@ -407,7 +585,14 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("CBK 备份工具")
-        self.resize(900, 680)
+        self.setStyleSheet(STYLE)
+        self.setMinimumSize(640, 460)
+        screen = QApplication.primaryScreen()
+        available = screen.availableGeometry() if screen else None
+        self.resize(
+            min(1100, available.width() - 40) if available else 1100,
+            min(900, available.height() - 70) if available else 850,
+        )
 
         # ---- 取算法列表（cbk info） ----
         try:
@@ -439,6 +624,9 @@ class MainWindow(QMainWindow):
         self._started_at = 0.0
         self._transfer_started_at: float | None = None
         self._done_bytes = 0
+        self._total_bytes = 0
+        self._transfer_samples: deque[tuple[float, int]] = deque(maxlen=128)
+        self._last_transfer_progress_at: float | None = None
         self._elapsed_timer = QTimer(self)
         self._elapsed_timer.setInterval(200)
         self._elapsed_timer.timeout.connect(self._update_elapsed)
@@ -448,10 +636,10 @@ class MainWindow(QMainWindow):
         self.restore_tab = RestoreTab(self._start_restore)
         self.inspect_tab = InspectTab(self._start_list, self._start_verify)
 
-        tabs = QTabWidget()
-        tabs.addTab(self.backup_tab, "备份")
-        tabs.addTab(self.restore_tab, "恢复")
-        tabs.addTab(self.inspect_tab, "查看 / 校验")
+        self.pages = PageStack()
+        self.pages.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        for page in (self.backup_tab, self.restore_tab, self.inspect_tab):
+            self.pages.addWidget(page)
 
         # ---- 底部公共区 ----
         self.progress = QProgressBar()
@@ -463,6 +651,7 @@ class MainWindow(QMainWindow):
         self.status_label.setTextFormat(Qt.PlainText)
         self.status_label.setWordWrap(True)
         self.elapsed_label = QLabel("")
+        self.elapsed_label.setWordWrap(True)
 
         self.cancel_btn = QPushButton("取消")
         self.cancel_btn.setEnabled(False)
@@ -471,23 +660,113 @@ class MainWindow(QMainWindow):
         self.log = QPlainTextEdit()
         self.log.setReadOnly(True)
         self.log.setMaximumBlockCount(5000)
+        self.log.setMinimumHeight(160)
+        self.log.setMaximumHeight(240)
+        self.log.setVisible(False)
+        self.log_toggle = QPushButton("展开运行日志")
+        self.log_toggle.setCheckable(True)
+        self.log_toggle.toggled.connect(self._toggle_log)
+        self.state_badge = QLabel("待机")
+        self.state_badge.setObjectName("badge")
+        self.state_badge.setProperty("state", "idle")
+        self.elapsed_label.setText("耗时、速度与预计剩余时间将在任务开始后显示")
+        self.elapsed_label.setObjectName("subtitle")
+        self.status_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
 
         bottom_row = QHBoxLayout()
-        bottom_row.addWidget(self.status_label, 1)
+        bottom_row.addWidget(self.state_badge)
+        bottom_row.addStretch(1)
         bottom_row.addWidget(self.cancel_btn)
 
         bottom = QVBoxLayout()
         bottom.addLayout(bottom_row)
+        bottom.addWidget(self.status_label)
         bottom.addWidget(self.progress)
         bottom.addWidget(self.elapsed_label)
-        bottom.addWidget(self.log, 2)
-
+        sidebar = QFrame()
+        sidebar.setObjectName("sidebar")
+        sidebar.setFixedWidth(180)
+        side = QVBoxLayout(sidebar)
+        side.setContentsMargins(14, 28, 14, 24)
+        side.setSpacing(10)
+        brand = QLabel("CBK")
+        brand.setObjectName("brand")
+        side.addWidget(brand)
+        tagline = QLabel("文件备份与恢复")
+        tagline.setObjectName("sideNote")
+        side.addWidget(tagline)
+        side.addSpacing(26)
+        self.nav_buttons = []
+        for index, (title, icon) in enumerate(
+            (("创建备份", "backup"), ("恢复文件", "restore"), ("查看与校验", "inspect"))
+        ):
+            button = QPushButton(title)
+            button.setIcon(QIcon(LineIcon(icon)))
+            button.setIconSize(QSize(20, 20))
+            button.setProperty("nav", True)
+            button.setCheckable(True)
+            button.clicked.connect(lambda checked=False, i=index: self._select_page(i))
+            self.nav_buttons.append(button)
+            side.addWidget(button)
+        side.addStretch(1)
+        footer = QLabel("本地备份\n从容保存，随时恢复")
+        footer.setObjectName("sideNote")
+        side.addWidget(footer)
+        workspace = QWidget()
+        workspace.setObjectName("workspace")
+        content = QVBoxLayout(workspace)
+        content.setContentsMargins(24, 24, 24, 24)
+        content.setSpacing(16)
+        content.addWidget(self.pages)
+        content.addWidget(_card("任务进度", bottom))
+        content.addWidget(self.log_toggle, 0, Qt.AlignLeft)
+        content.addWidget(self.log)
+        content.addStretch(1)
+        self.scroll = QScrollArea()
+        self.scroll.setWidgetResizable(True)
+        self.scroll.setWidget(workspace)
         root = QWidget()
-        layout = QVBoxLayout(root)
-        layout.addWidget(tabs, 3)
-        layout.addLayout(bottom, 2)
+        layout = QHBoxLayout(root)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        layout.addWidget(sidebar)
+        layout.addWidget(self.scroll, 1)
         self.setCentralWidget(root)
-        self.statusBar().showMessage(f"运行程序：{bridge.CBK_EXE}")
+        self._select_page(0)
+
+    def _select_page(self, index: int) -> None:
+        self.pages.setCurrentIndex(index)
+        for i, button in enumerate(self.nav_buttons):
+            button.setChecked(i == index)
+            page = self.pages.widget(i)
+            page.setSizePolicy(
+                QSizePolicy.Preferred, QSizePolicy.Preferred if i == index else QSizePolicy.Ignored
+            )
+        self.pages.updateGeometry()
+        self.scroll.verticalScrollBar().setValue(0)
+
+    def _toggle_log(self, expanded: bool) -> None:
+        self.log.setVisible(expanded)
+        self.log_toggle.setText("收起运行日志" if expanded else "展开运行日志")
+
+    def _set_status(self, text: str) -> None:
+        self.status_label.setText(text)
+        if "取消" in text:
+            state, label = "cancelled", "正在取消" if self._busy() else "已取消"
+        elif self._busy():
+            state, label = "running", "运行中"
+        elif "部分成功" in text:
+            state, label = "warning", "部分成功"
+        elif "完成" in text or "通过" in text:
+            state, label = "success", "成功"
+        else:
+            state, label = "error", "失败"
+        self.state_badge.setText(label)
+        self.state_badge.setProperty("state", state)
+        self.state_badge.style().unpolish(self.state_badge)
+        self.state_badge.style().polish(self.state_badge)
+        if state in {"error", "warning"}:
+            self.log_toggle.setChecked(True)
 
     # ---------------------------------------------- 启动任务
 
@@ -501,6 +780,9 @@ class MainWindow(QMainWindow):
         self._started_at = time.monotonic()
         self._transfer_started_at = None
         self._done_bytes = 0
+        self._total_bytes = 0
+        self._transfer_samples.clear()
+        self._last_transfer_progress_at = None
         self._phase = ""
         self._operation = ""
         self.elapsed_label.clear()
@@ -511,7 +793,7 @@ class MainWindow(QMainWindow):
         self._cancel_event.clear()
         self.log.clear()
         self.progress.setRange(0, 0)  # 不确定进度，等 start 事件再切确定
-        self.status_label.setText(status)
+        self._set_status(status)
         self.cancel_btn.setEnabled(True)
         return True
 
@@ -546,13 +828,59 @@ class MainWindow(QMainWindow):
             self._start_failed(exc)
 
     def _update_elapsed(self) -> None:
-        elapsed = max(0, int(time.monotonic() - self._started_at))
+        now = time.monotonic()
+        elapsed = max(0, int(now - self._started_at))
         text = f"已用时 {elapsed // 60:02d}:{elapsed % 60:02d}"
+        if not self._busy():
+            self.elapsed_label.setText(text)
+            return
         if self._phase == "transfer" and self._transfer_started_at is not None:
-            duration = time.monotonic() - self._transfer_started_at
+            duration = now - self._transfer_started_at
             if duration > 0.2 and self._done_bytes:
                 text += f"  ·  平均 {_human_bytes(int(self._done_bytes / duration))}/s"
+        if self._cancel_requested:
+            text += "  ·  正在取消…"
+        elif self._task_kind == "process" and self._operation:
+            if self._phase in {"finalize", "metadata"}:
+                text += "  ·  正在收尾…"
+            elif self._phase == "transfer":
+                text += "  ·  " + self._remaining_time(now)
+            else:
+                text += "  ·  预计剩余：正在估算…"
         self.elapsed_label.setText(text)
+
+    def _remaining_time(self, now: float) -> str:
+        """Estimate transfer time using at most ten seconds of recent samples."""
+        self._transfer_samples.append((now, self._done_bytes))
+        while len(self._transfer_samples) > 1 and self._transfer_samples[1][0] <= now - 10:
+            self._transfer_samples.popleft()
+        if self._total_bytes > 0 and self._done_bytes >= self._total_bytes:
+            return "正在收尾…"
+        start, initial_bytes = self._transfer_samples[0]
+        duration = now - start
+        transferred = self._done_bytes - initial_bytes
+        if (
+            self._total_bytes <= 0
+            or duration < 2
+            or transferred <= 0
+            or self._last_transfer_progress_at is None
+            or now - self._last_transfer_progress_at >= 3
+        ):
+            return "预计剩余：正在估算…"
+        seconds = (self._total_bytes - self._done_bytes) * duration / transferred
+        if seconds < 10:
+            return "预计剩余不足 10 秒（不含收尾）"
+        # Round up to five seconds; this is an estimate rather than a countdown.
+        rounded = math.ceil(seconds / 5) * 5
+        hours, rest = divmod(rounded, 3600)
+        minutes, seconds = divmod(rest, 60)
+        if hours:
+            remaining = f"{hours} 小时 {minutes} 分"
+        elif minutes:
+            remaining = f"{minutes} 分 {seconds} 秒"
+        else:
+            remaining = f"{seconds} 秒"
+        return f"预计剩余约 {remaining}（不含收尾）"
 
     def _start_list(self, archive: str, password: str | None) -> None:
         """list 是一次性同步任务，用后台线程包一下。"""
@@ -598,7 +926,9 @@ class MainWindow(QMainWindow):
         self.cancel_btn.setEnabled(False)
         self.progress.setRange(0, 100)
         self.progress.setValue(0)
-        self.status_label.setText("启动失败")
+        self._update_elapsed()
+        self._set_status("启动失败")
+        self._log(f"[启动失败] {exc}")
         QMessageBox.critical(self, "启动失败", str(exc))
         self.current_proc = None
         if self._close_pending:
@@ -611,7 +941,8 @@ class MainWindow(QMainWindow):
             return
         self._cancel_requested = True
         self._cancel_event.set()
-        self.status_label.setText("正在取消…")
+        self._set_status("正在取消…")
+        self._update_elapsed()
         self.cancel_btn.setEnabled(False)
         if self.current_proc is not None:
             self.current_proc.cancel()
@@ -635,9 +966,7 @@ class MainWindow(QMainWindow):
             self.progress.setValue(0)
             self._log(f"开始：{entries} 个条目，共 {_human_bytes(total)}")
             self.progress.setFormat(f"{self._operation} · %p%")
-            self.status_label.setText(
-                f"准备{self._operation}：{entries} 个条目，共 {_human_bytes(total)}"
-            )
+            self._set_status(f"准备{self._operation}：{entries} 个条目，共 {_human_bytes(total)}")
 
         elif kind == "progress":
             phase = ev.get("phase", "transfer")  # 兼容旧版后端的进度事件
@@ -675,11 +1004,18 @@ class MainWindow(QMainWindow):
                 self.progress.setValue(max(0, min(1000, value)))
                 self.progress.setFormat(f"{label} · %p%" if total_b or total_e else label)
                 if phase == "transfer":
+                    now = time.monotonic()
                     if self._transfer_started_at is None:
-                        self._transfer_started_at = time.monotonic()
+                        self._transfer_started_at = now
+                    if not self._transfer_samples or done_b < self._done_bytes:
+                        self._transfer_samples.clear()
+                        self._transfer_samples.append((now, done_b))
+                    if done_b != self._done_bytes:
+                        self._last_transfer_progress_at = now
                     self._done_bytes = done_b
+                    self._total_bytes = total_b
                     detail = f"{done_e}/{total_e} 个条目  ·  {detail}"
-            self.status_label.setText(
+            self._set_status(
                 f"正在{label}"
                 + (f"  ·  {detail}" if detail else "")
                 + (f"  —  {path}" if path else "")
@@ -705,31 +1041,32 @@ class MainWindow(QMainWindow):
         self._errors.append(line)
         self._errors = self._errors[-20:]
         self._log(f"[stderr] {line}")
+        self.log_toggle.setChecked(True)
 
     def _on_exit(self, code: int) -> None:
         self._elapsed_timer.stop()
-        self._update_elapsed()
         previous_percent = max(0, self.progress.value()) * 100 // max(1, self.progress.maximum())
         self.progress.setFormat("%p%")
         self._task_kind = ""
+        self._update_elapsed()
         self.cancel_btn.setEnabled(False)
         self.current_proc = None
         self.progress.setRange(0, 100)
         self.progress.setValue(previous_percent)
         if self._cancel_requested and code != 0:
             self.progress.setValue(0)
-            self.status_label.setText("已取消")
+            self._set_status("已取消")
         elif code == 0:
             self.progress.setValue(100)
-            self.status_label.setText("完成")
+            self._set_status("完成")
         elif code == 1:
-            self.status_label.setText("部分成功（有警告）")
+            self._set_status("部分成功（有警告）")
         elif code == 2:
-            self.status_label.setText("失败")
+            self._set_status("失败")
         elif code == 3:
-            self.status_label.setText("参数错误")
+            self._set_status("参数错误")
         else:
-            self.status_label.setText(f"进程退出码 {code}")
+            self._set_status(f"进程退出码 {code}")
         self._log(f"[退出] code={code}")
         if self._close_pending:
             QTimer.singleShot(0, self.close)
@@ -748,9 +1085,9 @@ class MainWindow(QMainWindow):
         """处理 list / verify 这类一次性任务的结果。"""
         kind, data = payload
         self._elapsed_timer.stop()
-        self._update_elapsed()
         self.progress.setFormat("%p%")
         self._task_kind = ""
+        self._update_elapsed()
         self.cancel_btn.setEnabled(False)
         self.progress.setRange(0, 100)
         self.progress.setValue(0 if self._cancel_requested or kind.endswith("_error") else 100)
@@ -758,24 +1095,27 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(0, self.close)
             return
         if self._cancel_requested:
-            self.status_label.setText("已取消")
+            self._set_status("已取消")
             return
         if kind == "list":
             try:
                 self._render_listing(data)
-                self.status_label.setText("读取完成")
+                self._set_status("读取完成")
             except (ValueError, TypeError, OverflowError, AttributeError) as exc:
                 self.progress.setValue(0)
-                self.status_label.setText("读取失败")
+                self._set_status("读取失败")
+                self._log(f"[读取失败] 归档列表数据无效：{exc}")
                 QMessageBox.warning(self, "读取失败", f"归档列表数据无效：{exc}")
         elif kind == "list_error":
-            self.status_label.setText("读取失败")
+            self._set_status("读取失败")
+            self._log(f"[读取失败] {data}")
             QMessageBox.critical(self, "读取失败", data)
         elif kind == "verify_ok":
-            self.status_label.setText("校验通过")
+            self._set_status("校验通过")
             QMessageBox.information(self, "校验", f"容器校验通过（未验证密码和解密恢复）：\n{data}")
         elif kind == "verify_error":
-            self.status_label.setText("校验失败")
+            self._set_status("校验失败")
+            self._log(f"[校验失败] {data}")
             QMessageBox.critical(self, "校验失败", data)
 
     def _render_listing(self, data: dict[str, Any]) -> None:
@@ -795,6 +1135,7 @@ class MainWindow(QMainWindow):
                 f"{e.get('path', '')}"
             )
         self.log.setPlainText("\n".join(lines))
+        self.log_toggle.setChecked(True)
         self._log(f"[list] {data.get('entryCount')} 个条目")
 
     # ---------------------------------------------- 工具
