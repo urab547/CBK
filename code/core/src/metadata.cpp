@@ -90,11 +90,16 @@ bool ApplyTimestamps(const std::wstring& path, const EntryMeta& meta, bool no_fo
 /// 先和 kSettableAttributes 相与，把目录、重解析点、压缩这类由文件系统维护、
 /// 不能手动设置的位滤掉，否则 SetFileAttributesW 会报参数错误。
 bool ApplyAttributes(const std::wstring& path, const EntryMeta& meta, uint32_t* win_error) {
-    const DWORD attributes = static_cast<DWORD>(meta.attributes & kSettableAttributes);
+    // 整个字段为 0 表示备份时没记录。Windows 上真实存在的对象至少带
+    // NORMAL 或 DIRECTORY 中的一位，所以 0 不会是"源端确实什么位都没有"。
+    if (meta.attributes == 0) return true;
 
-    // 一位都不用设时就别调了：SetFileAttributesW 不接受 0，
-    // 得传 FILE_ATTRIBUTE_NORMAL，而那会把已有的位全清掉。
-    if (attributes == 0) return true;
+    DWORD attributes = static_cast<DWORD>(meta.attributes & kSettableAttributes);
+
+    // 记录了、但一个可设置的位都没有：要把目标上的位清干净才和源端一致。
+    // 新建的文件系统会自动带上 ARCHIVE，不清的话还原出来平白多一个"存档"位。
+    // SetFileAttributesW 不接受 0，"全部清掉"的写法是传 FILE_ATTRIBUTE_NORMAL。
+    if (attributes == 0) attributes = FILE_ATTRIBUTE_NORMAL;
 
     if (SetFileAttributesW(platform::ToExtendedPath(path).c_str(), attributes) == 0) {
         Record(win_error);

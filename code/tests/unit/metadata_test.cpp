@@ -119,20 +119,81 @@ TEST(Metadata, ApplyAttributesMasksOutUnsettableBits) {
     EXPECT_EQ(0u, actual & FILE_ATTRIBUTE_DIRECTORY);
 }
 
-TEST(Metadata, ApplyAttributesWithNothingToSetIsNoOp) {
-    // 一位都不用设时不能去调 SetFileAttributesW：它不接受 0，
-    // 得传 FILE_ATTRIBUTE_NORMAL，而那会把已有的位全清掉。
+TEST(Metadata, ApplyAttributesClearsBitsTheSourceDidNotHave) {
+    // 源端一个可设置的位都没有（FindFirstFileW 报的是 FILE_ATTRIBUTE_NORMAL），
+    // 目标上多出来的位就得清掉。最常见的是新建文件时系统自动加的 ARCHIVE——
+    // 以前这里直接 return，还原出来平白多一个"存档"位。
+    cbk_test::TempDir temp;
+    const std::wstring file = temp.MakeFile(L"a.txt", "x");
+    ASSERT_NE(0, SetFileAttributesW(pf::ToExtendedPath(file).c_str(),
+                                    FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_ARCHIVE));
+
+    cbk::EntryMeta meta;
+    meta.attributes = FILE_ATTRIBUTE_NORMAL;
+
+    uint32_t error = 0;
+    EXPECT_TRUE(cbk::ApplyAttributes(file, meta, &error)) << "Win32 错误 " << error;
+    const DWORD actual = GetFileAttributesW(pf::ToExtendedPath(file).c_str());
+    EXPECT_EQ(0u, actual & (FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_ARCHIVE))
+        << "源端没有的位没被清掉，实际属性 0x" << std::hex << actual;
+}
+
+TEST(Metadata, ApplyAttributesClearsBitsOnDirectoriesToo) {
+    // 目录同理：源目录只有 DIRECTORY 位，目标目录上的 HIDDEN 要清掉，且仍是目录。
+    cbk_test::TempDir temp;
+    const std::wstring dir = temp.MakeDir(L"d");
+    ASSERT_NE(0, SetFileAttributesW(pf::ToExtendedPath(dir).c_str(), FILE_ATTRIBUTE_HIDDEN));
+
+    cbk::EntryMeta meta;
+    meta.attributes = FILE_ATTRIBUTE_DIRECTORY;
+
+    uint32_t error = 0;
+    EXPECT_TRUE(cbk::ApplyAttributes(dir, meta, &error)) << "Win32 错误 " << error;
+    const DWORD actual = GetFileAttributesW(pf::ToExtendedPath(dir).c_str());
+    EXPECT_NE(0u, actual & FILE_ATTRIBUTE_DIRECTORY);
+    EXPECT_EQ(0u, actual & FILE_ATTRIBUTE_HIDDEN) << "实际属性 0x" << std::hex << actual;
+}
+
+TEST(Metadata, ApplyAttributesWithUnrecordedAttributesIsNoOp) {
+    // attributes 整个为 0 表示没记录，不能据此去清目标上的位。
     cbk_test::TempDir temp;
     const std::wstring file = temp.MakeFile(L"a.txt", "x");
     ASSERT_NE(0, SetFileAttributesW(pf::ToExtendedPath(file).c_str(), FILE_ATTRIBUTE_HIDDEN));
 
     cbk::EntryMeta meta;
-    meta.attributes = FILE_ATTRIBUTE_DIRECTORY;  // 全是不可设置的位
+    meta.attributes = 0;
 
     uint32_t error = 0;
     EXPECT_TRUE(cbk::ApplyAttributes(file, meta, &error));
     const DWORD actual = GetFileAttributesW(pf::ToExtendedPath(file).c_str());
-    EXPECT_NE(0u, actual & FILE_ATTRIBUTE_HIDDEN) << "原有的 HIDDEN 位被抹掉了";
+    EXPECT_NE(0u, actual & FILE_ATTRIBUTE_HIDDEN) << "没记录属性时不该动目标";
+}
+
+TEST(Metadata, FileWithoutArchiveBitRoundTripsWithoutGainingIt) {
+    // 端到端：清掉了存档位的文件，备份再还原，不能多出存档位。
+    cbk::RegisterBuiltinPackers();
+    cbk_test::TempDir temp;
+    temp.MakeDir(L"src");
+    const std::wstring plain = temp.MakeFile(L"src\\无存档位.txt", "x");
+    const std::wstring hidden = temp.MakeFile(L"src\\只有隐藏.txt", "y");
+    ASSERT_NE(0, SetFileAttributesW(pf::ToExtendedPath(plain).c_str(), FILE_ATTRIBUTE_NORMAL));
+    ASSERT_NE(0, SetFileAttributesW(pf::ToExtendedPath(hidden).c_str(), FILE_ATTRIBUTE_HIDDEN));
+
+    cbk::BackupOptions backup;
+    backup.source_root = temp.At(L"src");
+    backup.dest_archive = temp.At(L"o.cbk");
+    ASSERT_EQ(cbk::Status::kOk, cbk::RunBackup(backup, nullptr).status);
+    cbk::RestoreOptions restore;
+    restore.archive = temp.At(L"o.cbk");
+    restore.dest_root = temp.At(L"back");
+    ASSERT_EQ(cbk::Status::kOk, cbk::RunRestore(restore, nullptr).status);
+
+    const DWORD mask = static_cast<DWORD>(cbk::kSettableAttributes);
+    EXPECT_EQ(
+        0u, GetFileAttributesW(pf::ToExtendedPath(temp.At(L"back\\无存档位.txt")).c_str()) & mask);
+    EXPECT_EQ(
+        static_cast<DWORD>(FILE_ATTRIBUTE_HIDDEN),
+        GetFileAttributesW(pf::ToExtendedPath(temp.At(L"back\\只有隐藏.txt")).c_str()) & mask);
 }
 
 // ============================================================ 时间戳
