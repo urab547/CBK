@@ -33,8 +33,10 @@ public:
     /// @param stages   按应用顺序排列。stages[0] 最先看到数据。
     /// @param terminal 链尾，通常是容器的数据区或索引区。必须比本对象活得久。
     StageChainSink(std::vector<std::unique_ptr<IStage>> stages, ISink* terminal);
+    /// 析构不自动 Finish，调用方必须显式调用 Finish()。
     ~StageChainSink();
 
+    /// 禁止拷贝：内部适配器之间互相持有指针，拷贝后指针会指错对象。
     StageChainSink(const StageChainSink&) = delete;
     StageChainSink& operator=(const StageChainSink&) = delete;
 
@@ -49,12 +51,13 @@ public:
     void Finish();
 
 private:
+    /// 把一个 IStage 包装成 ISink 的适配器，定义在 .cpp 里。
     class Adapter;
 
-    ISink* terminal_;
-    std::vector<std::unique_ptr<IStage>> stages_;
-    std::vector<std::unique_ptr<Adapter>> adapters_;
-    bool finished_ = false;
+    ISink* terminal_;                                 ///< 链尾，不持有
+    std::vector<std::unique_ptr<IStage>> stages_;     ///< 各段变换，按顺序
+    std::vector<std::unique_ptr<Adapter>> adapters_;  ///< 与 stages_ 一一对应
+    bool finished_ = false;                           ///< 已经冲刷过，防止重复
 };
 
 /// 还原方向：把推式的 Stage 链包成一个拉式的 ISource。
@@ -65,6 +68,7 @@ public:
     StageChainSource(ISource* upstream, std::vector<std::unique_ptr<IStage>> stages);
     ~StageChainSource() override;
 
+    /// 拉取最多 len 字节已还原的数据；返回 0 表示全部读完。
     size_t Read(uint8_t* buf, size_t len) override;
 
 private:
@@ -75,11 +79,11 @@ private:
     /// @return 还有没有可能产出更多数据。
     bool PumpOnce();
 
-    ISource* upstream_;
+    ISource* upstream_;             ///< 原始字节来源，不持有
     std::vector<uint8_t> input_;    ///< 一次拉一块的临时缓冲
     std::vector<uint8_t> pending_;  ///< 链尾吐出来、还没被取走的字节
-    size_t pending_offset_ = 0;
-    bool finished_ = false;
+    size_t pending_offset_ = 0;     ///< pending_ 里已经交出去多少
+    bool finished_ = false;         ///< 上游已读完并冲刷过
 
     // 声明顺序即构造顺序，销毁时反过来：chain_ 先于 terminal_ 先于 pending_，
     // 保证链在它写入的缓冲还活着的时候就已经拆掉了。

@@ -21,12 +21,14 @@ namespace cbk {
 /// 按小端往一个 vector 尾部追加。
 class ByteWriter {
 public:
+    /// @param out 写入目标，不持有，调用方保证它活得比本对象久。
     explicit ByteWriter(std::vector<uint8_t>* out) : out_(out) {}
 
-    void WriteU8(uint8_t value);
-    void WriteU16(uint16_t value);
-    void WriteU32(uint32_t value);
-    void WriteU64(uint64_t value);
+    void WriteU8(uint8_t value);    ///< 写 1 字节
+    void WriteU16(uint16_t value);  ///< 写 2 字节整数（小端：低位字节在前）
+    void WriteU32(uint32_t value);  ///< 写 4 字节整数（小端）
+    void WriteU64(uint64_t value);  ///< 写 8 字节整数（小端）
+    /// 原样追加一段字节。
     void WriteBytes(const void* data, size_t len);
 
     /// U32 长度前缀 + 原始字节。空串写成一个 0 长度。
@@ -35,10 +37,11 @@ public:
     /// 补 count 个 0，用于定长区块的 reserved 部分。
     void WriteZeros(size_t count);
 
+    /// 目前已写了多少字节。
     size_t Size() const { return out_->size(); }
 
 private:
-    std::vector<uint8_t>* out_;
+    std::vector<uint8_t>* out_;  ///< 写入目标
 };
 
 /// 按小端从一段只读内存里取值，越界不抛异常，只置错误位。
@@ -47,14 +50,16 @@ private:
 /// 都返回 0 且不再前进，所以不必每读一个字段就判断一次。
 class ByteReader {
 public:
+    /// 从一段裸内存读。不持有内存。
     ByteReader(const uint8_t* data, size_t len) : data_(data), len_(len) {}
+    /// 从一个 vector 读。不持有，vector 必须活得比本对象久。
     explicit ByteReader(const std::vector<uint8_t>& buffer)
         : data_(buffer.data()), len_(buffer.size()) {}
 
-    uint8_t ReadU8();
-    uint16_t ReadU16();
-    uint32_t ReadU32();
-    uint64_t ReadU64();
+    uint8_t ReadU8();    ///< 读 1 字节，越界返回 0
+    uint16_t ReadU16();  ///< 读小端 2 字节整数，越界返回 0
+    uint32_t ReadU32();  ///< 读小端 4 字节整数，越界返回 0
+    uint64_t ReadU64();  ///< 读小端 8 字节整数，越界返回 0
 
     /// 读 len 字节到 out。越界时返回 false 并置错误位。
     bool ReadBytes(void* out, size_t len);
@@ -67,17 +72,19 @@ public:
 
     /// 到目前为止有没有越界过。
     bool IsOk() const { return ok_; }
+    /// 当前读到第几个字节。
     size_t Offset() const { return offset_; }
+    /// 还剩多少字节没读（出过错就当 0）。
     size_t Remaining() const { return ok_ ? len_ - offset_ : 0; }
 
 private:
     /// 检查还能不能读 need 字节，不能就置错误位。
     bool Require(size_t need);
 
-    const uint8_t* data_;
-    size_t len_;
-    size_t offset_ = 0;
-    bool ok_ = true;
+    const uint8_t* data_;  ///< 数据起点
+    size_t len_;           ///< 数据总长
+    size_t offset_ = 0;    ///< 当前读取位置
+    bool ok_ = true;       ///< 是否从未越界
 };
 
 // ============================================================================
@@ -87,28 +94,33 @@ private:
 /// 把写进来的字节全收进一个 vector。测试和索引区序列化都要用。
 class VectorSink : public ISink {
 public:
+    /// 把数据追加到内部 vector 末尾。
     void Write(const uint8_t* data, size_t len) override;
 
+    /// 取出已收集的全部字节（只读 / 可改两个版本）。
     const std::vector<uint8_t>& Buffer() const { return buffer_; }
     std::vector<uint8_t>& Buffer() { return buffer_; }
 
 private:
-    std::vector<uint8_t> buffer_;
+    std::vector<uint8_t> buffer_;  ///< 收集到的字节
 };
 
 /// 从一段内存里顺序读。不持有内存，调用方要保证生命周期。
 class MemorySource : public ISource {
 public:
+    /// 从一段裸内存读。
     MemorySource(const uint8_t* data, size_t len) : data_(data), len_(len) {}
+    /// 从一个 vector 读。
     explicit MemorySource(const std::vector<uint8_t>& buffer)
         : data_(buffer.data()), len_(buffer.size()) {}
 
+    /// 最多拷 len 字节到 buf，返回实际拷贝数；读完了返回 0。
     size_t Read(uint8_t* buf, size_t len) override;
 
 private:
-    const uint8_t* data_;
-    size_t len_;
-    size_t offset_ = 0;
+    const uint8_t* data_;  ///< 数据起点
+    size_t len_;           ///< 数据总长
+    size_t offset_ = 0;    ///< 已读到的位置
 };
 
 /// 从 source 精确读满 len 字节。

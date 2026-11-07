@@ -60,19 +60,26 @@ std::wstring JoinPath(const std::wstring& base, const std::wstring& child);
 /// 而 CreateEvent 之类失败返回 nullptr。IsValid() 两种都认。
 class ScopedHandle {
 public:
+    /// 空对象，不持有句柄。
     ScopedHandle() = default;
+    /// 接管一个已打开的句柄，之后由本对象负责关闭。
     explicit ScopedHandle(HANDLE handle) : handle_(handle) {}
+    /// 析构时自动 CloseHandle，任何提前 return 都不会漏关。
     ~ScopedHandle() { Reset(); }
 
+    /// 禁止拷贝：两个对象持有同一句柄会被关两次。
     ScopedHandle(const ScopedHandle&) = delete;
     ScopedHandle& operator=(const ScopedHandle&) = delete;
 
+    /// 允许移动：所有权转给新对象，旧对象变空。函数才能把句柄 return 出去。
     ScopedHandle(ScopedHandle&& other) noexcept : handle_(other.handle_) {
         other.handle_ = INVALID_HANDLE_VALUE;
     }
     ScopedHandle& operator=(ScopedHandle&& other) noexcept;
 
+    /// 句柄是否有效（两种无效值都排除）。
     bool IsValid() const { return handle_ != INVALID_HANDLE_VALUE && handle_ != nullptr; }
+    /// 取出原始句柄交给 Win32 API，所有权不变。
     HANDLE Get() const { return handle_; }
 
     /// 交出所有权，之后本对象不再负责关闭。
@@ -82,7 +89,7 @@ public:
     void Reset(HANDLE handle = INVALID_HANDLE_VALUE);
 
 private:
-    HANDLE handle_ = INVALID_HANDLE_VALUE;
+    HANDLE handle_ = INVALID_HANDLE_VALUE;  ///< 持有的句柄
 };
 
 /// 打开文件或目录的通用入口。path 传原始路径即可，内部会转扩展长度路径。
@@ -126,6 +133,7 @@ struct PrivilegeState {
     bool restore = false;   ///< SE_RESTORE_NAME，绕过 ACL 写、设置任意属主
     bool security = false;  ///< SE_SECURITY_NAME，读写 SACL
 
+    /// 三项是否全部拿到。
     bool AllGranted() const { return backup && restore && security; }
 };
 

@@ -70,19 +70,25 @@ public:
 /// GUI 拿这个列表填下拉框——所以新加一种算法，界面不用改一行代码。
 class PackerRegistry {
 public:
+    /// 工厂：每次调用造一个新的打包器实例。
     using Factory = std::function<std::unique_ptr<IPacker>()>;
 
+    /// 全局唯一实例（单例）。
     static PackerRegistry& Instance();
 
+    /// 登记一个名字和它的工厂。
     void Register(const std::string& name, Factory factory);
+    /// 这个名字是否已登记。
     bool Has(const std::string& name) const;
     /// 名字不存在时返回 nullptr，由调用方报参数错误（退出码 3）。
     std::unique_ptr<IPacker> Create(const std::string& name) const;
+    /// 全部名字，按字母序。
     std::vector<std::string> Names() const;
 
 private:
+    /// 构造函数私有：只能通过 Instance() 拿到唯一实例。
     PackerRegistry() = default;
-    std::map<std::string, Factory> factories_;
+    std::map<std::string, Factory> factories_;  ///< 名字 → 工厂
 };
 
 /// 注册所有内置打包器。

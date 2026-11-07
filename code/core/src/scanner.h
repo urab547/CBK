@@ -25,6 +25,7 @@
 
 namespace cbk {
 
+/// 遍历选项。
 struct ScanOptions {
     /// 是否跟随符号链接和 junction 递归进去。
     ///
@@ -34,6 +35,7 @@ struct ScanOptions {
     bool follow_symlinks = false;
 };
 
+/// 遍历结束后的统计数字，备份引擎用它填进度条的分母。
 struct ScanStats {
     uint64_t entries = 0;      ///< 成功产出的条目数
     uint64_t total_bytes = 0;  ///< 所有普通文件的原始字节数之和
@@ -62,8 +64,12 @@ struct ScanStats {
 /// 把源根的元数据往目标根上套没有意义。所以 relative_path 永远非空。
 class Scanner {
 public:
+    /// @param root     源目录（任意形式，内部会规范化成绝对路径）
+    /// @param options  遍历选项
+    /// @param observer 接收告警、查询取消，可为 nullptr
     Scanner(std::wstring root, ScanOptions options, IProgressObserver* observer);
 
+    /// 每发现一个条目就调用一次的回调。
     using EntryCallback = std::function<void(const EntryMeta&)>;
 
     /// 开始遍历。
@@ -79,18 +85,19 @@ private:
         std::wstring relative;  ///< 相对源根，空串表示根本身
     };
 
+    /// 发告警并标记 had_warning_，最终结果据此变成 kPartial。
     void Warn(const std::wstring& relative, const std::wstring& message, uint32_t win_error);
 
     /// 跟随模式下，把一条链接改记成它指向的东西（目录或普通文件）。
     void MaterializeFollowedLink(const std::wstring& absolute, EntryMeta* meta, ScanStats* stats);
 
-    std::wstring root_;
-    ScanOptions options_;
-    IProgressObserver* observer_;
+    std::wstring root_;            ///< 规范化后的源根绝对路径
+    ScanOptions options_;          ///< 遍历选项
+    IProgressObserver* observer_;  ///< 告警与取消的通道，可为空
 
-    uint64_t next_id_ = 0;
-    bool cancelled_ = false;
-    bool had_warning_ = false;
+    uint64_t next_id_ = 0;      ///< 下一个条目的编号，从 0 递增
+    bool cancelled_ = false;    ///< 收到取消请求
+    bool had_warning_ = false;  ///< 出过至少一条告警
 };
 
 }  // namespace cbk

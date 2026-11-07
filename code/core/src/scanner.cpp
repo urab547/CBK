@@ -32,10 +32,15 @@ uint64_t ToUint64(const FILETIME& time) {
     return (static_cast<uint64_t>(time.dwHighDateTime) << 32) | time.dwLowDateTime;
 }
 
+/// 把高 32 位和低 32 位两个半截拼成一个 64 位整数。
+/// 文件大小、文件索引号在 Win32 结构体里都是这样拆成两半存的。
 uint64_t ToUint64(DWORD high, DWORD low) {
     return (static_cast<uint64_t>(high) << 32) | low;
 }
 
+/// 是不是 "." 或 ".."。FindFirstFileW 在每个目录里都会列出这两项
+/// （分别代表当前目录和上级目录），必须跳过——否则会原地打转，
+/// 或者顺着 ".." 跑到源目录外面去。
 bool IsDotOrDotDot(const wchar_t* name) {
     if (name[0] != L'.') return false;
     if (name[1] == L'\0') return true;
@@ -84,15 +89,17 @@ bool IsLink(FileType type) {
 /// 跟随模式下用来断环的身份：同一个目录无论从哪条链接走到，
 /// (卷序列号, 文件索引) 都一样。
 struct FileIdentity {
-    uint32_t volume_serial = 0;
-    uint64_t file_index = 0;
+    uint32_t volume_serial = 0;  ///< 卷序列号
+    uint64_t file_index = 0;     ///< 文件索引号，卷内唯一
 
+    /// std::set 需要排序关系：先比卷，再比索引号。
     bool operator<(const FileIdentity& other) const {
         if (volume_serial != other.volume_serial) return volume_serial < other.volume_serial;
         return file_index < other.file_index;
     }
 };
 
+/// 打开路径（会跟随链接）取它的 (卷序列号, 文件索引号)。打不开返回 false。
 bool QueryIdentity(const std::wstring& path, FileIdentity* out) {
     platform::ScopedHandle handle = platform::OpenForRead(path, false);
     if (!handle.IsValid()) return false;
@@ -105,6 +112,8 @@ bool QueryIdentity(const std::wstring& path, FileIdentity* out) {
 
 }  // namespace
 
+/// 跟随模式下，把一条链接改记成它指向的东西（目录或普通文件），
+/// 时间戳、属性、大小也都换成目标的。
 void Scanner::MaterializeFollowedLink(const std::wstring& absolute, EntryMeta* meta,
                                       ScanStats* stats) {
     // 跟着链接走一次，拿目标的真实身份。打不开（悬空链接）就退回原样，
@@ -138,9 +147,11 @@ void Scanner::MaterializeFollowedLink(const std::wstring& absolute, EntryMeta* m
     }
 }
 
+/// 源根先规范化成绝对路径，之后所有条目的路径都相对它来拼。
 Scanner::Scanner(std::wstring root, ScanOptions options, IProgressObserver* observer)
     : root_(platform::NormalizePath(root)), options_(options), observer_(observer) {}
 
+/// 发一条告警，并记下"这次遍历出过问题"，Scan 结束时据此返回 kPartial。
 void Scanner::Warn(const std::wstring& relative, const std::wstring& message, uint32_t win_error) {
     had_warning_ = true;
     if (observer_ == nullptr) return;
@@ -151,12 +162,15 @@ void Scanner::Warn(const std::wstring& relative, const std::wstring& message, ui
     observer_->OnWarn(warn);
 }
 
+/// 遍历主体。用显式栈而不是递归，原因见 scanner.h 开头。
 Status Scanner::Scan(const EntryCallback& on_entry, ScanStats* stats) {
+    // 每次 Scan 都从头开始：计数清零、id 从 0 编起。
     ScanStats local;
     next_id_ = 0;
     cancelled_ = false;
     had_warning_ = false;
 
+    // 显式栈：存"还没展开的目录"。一开始只有源根自己（用空串表示）。
     std::vector<PendingDir> stack;
     stack.push_back(PendingDir{std::wstring()});
 
@@ -171,15 +185,18 @@ Status Scanner::Scan(const EntryCallback& on_entry, ScanStats* stats) {
 
     bool root_ok = false;
 
+    // 主循环：每轮从栈里弹出一个目录，列出它的全部子项。栈空了就遍历完了。
     while (!stack.empty()) {
         if (observer_ != nullptr && observer_->IsCancelled()) {
             cancelled_ = true;
             break;
         }
 
+        // 从栈尾取出一个待展开的目录。
         const PendingDir current = stack.back();
         stack.pop_back();
 
+        // 拼出「目录路径 + 通配符 *」交给 FindFirstFileW，一次列出这一层的全部子项。
         const std::wstring absolute_dir =
             current.relative.empty() ? root_ : platform::JoinPath(root_, current.relative);
         const std::wstring pattern =
@@ -204,6 +221,7 @@ Status Scanner::Scan(const EntryCallback& on_entry, ScanStats* stats) {
         // 本层发现的子目录，先攒着，遍历完这一层再压栈。
         std::vector<std::wstring> subdirectories;
 
+        // 逐个处理这一层的子项。第一项 FindFirstFileW 已经取到了，之后靠 FindNextFileW。
         do {
             if (IsDotOrDotDot(find_data.cFileName)) continue;
             if (observer_ != nullptr && observer_->IsCancelled()) {
@@ -211,6 +229,8 @@ Status Scanner::Scan(const EntryCallback& on_entry, ScanStats* stats) {
                 break;
             }
 
+            // 先用 WIN32_FIND_DATAW 里现成的信息填一条记录：
+            // 编号、相对路径、类型、属性、三个时间戳、大小。
             EntryMeta meta;
             meta.id = next_id_++;
             meta.relative_path = current.relative.empty()
@@ -287,6 +307,7 @@ Status Scanner::Scan(const EntryCallback& on_entry, ScanStats* stats) {
                      0);
             }
 
+            // 交给调用方（备份引擎会把它存进条目表）。
             on_entry(meta);
             ++local.entries;
 
@@ -299,6 +320,8 @@ Status Scanner::Scan(const EntryCallback& on_entry, ScanStats* stats) {
             }
         } while (FindNextFileW(find, &find_data) != 0);
 
+        // FindNextFileW 返回 0 有两种可能：正常列完了（ERROR_NO_MORE_FILES），
+        // 或者中途出错。后者要告警，因为这一层可能有条目被漏掉了。
         const DWORD stop_reason = GetLastError();
         FindClose(find);
         if (stop_reason != ERROR_NO_MORE_FILES && stop_reason != ERROR_SUCCESS) {
@@ -307,6 +330,7 @@ Status Scanner::Scan(const EntryCallback& on_entry, ScanStats* stats) {
         }
         if (cancelled_) break;
 
+        // 把这一层发现的子目录压栈，后面的轮次再逐个展开。
         for (const std::wstring& child : subdirectories) {
             if (options_.follow_symlinks) {
                 // 断环：同一个目录第二次被走到就不再展开。
@@ -321,6 +345,7 @@ Status Scanner::Scan(const EntryCallback& on_entry, ScanStats* stats) {
 
     if (stats != nullptr) *stats = local;
 
+    // 结果：被取消或根目录打不开 → 失败；出过告警 → 部分成功；否则 → 成功。
     if (cancelled_) return Status::kFailed;
     if (!root_ok) return Status::kFailed;
     return had_warning_ ? Status::kPartial : Status::kOk;

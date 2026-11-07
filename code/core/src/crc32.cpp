@@ -26,14 +26,17 @@ constexpr std::array<uint32_t, 256> MakeTable() {
     return table;
 }
 
+/// 查表：kTable[i] = 字节 i 经过 8 轮多项式除法后的余数。
+/// 有了它，每处理一个字节只要一次查表、一次异或、一次移位。
 constexpr std::array<uint32_t, 256> kTable = MakeTable();
 
 }  // namespace
 
-// 把 state_ 拷进局部变量再循环。
-//
-// 成员变量每轮都要过一次 this 指针，编译器未必能证明循环里没人改它、
-// 因而不敢放进寄存器。几百 MB 的文件上这个差别是能测出来的。
+/// 逐字节更新：用"当前状态低 8 位 ^ 新字节"查表，再与状态右移 8 位异或。
+///
+/// 把 state_ 拷进局部变量再循环：成员变量每轮都要过一次 this 指针，
+/// 编译器未必能证明循环里没人改它、因而不敢放进寄存器。
+/// 几百 MB 的文件上这个差别是能测出来的。
 void Crc32::Update(const uint8_t* data, size_t len) {
     if (data == nullptr) return;
     uint32_t state = state_;
@@ -43,15 +46,18 @@ void Crc32::Update(const uint8_t* data, size_t len) {
     state_ = state;
 }
 
+/// 取当前结果（取反后的值）。
 uint32_t Crc32::Value() const {
     // 标准要求最后对结果取反。中间态不取反，是为了能继续累积。
     return state_ ^ 0xFFFFFFFFu;
 }
 
+/// 回到初值全 1，可以开始算下一段数据。
 void Crc32::Reset() {
     state_ = 0xFFFFFFFFu;
 }
 
+/// 便捷函数：建一个临时 Crc32，喂一次，取结果。
 uint32_t ComputeCrc32(const uint8_t* data, size_t len) {
     Crc32 crc;
     crc.Update(data, len);

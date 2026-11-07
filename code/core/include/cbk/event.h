@@ -21,10 +21,10 @@ struct StartInfo {
 
 /// 进度推进。
 struct ProgressInfo {
-    uint64_t done_entries = 0;
+    uint64_t done_entries = 0;   ///< 已处理的条目数
     uint64_t total_entries = 0;  ///< 0 表示未知
-    uint64_t done_bytes = 0;
-    uint64_t total_bytes = 0;  ///< 0 表示未知
+    uint64_t done_bytes = 0;     ///< 已处理的字节数
+    uint64_t total_bytes = 0;    ///< 0 表示未知
 
     /// 当前正在处理的条目。可能为 nullptr（比如正在写索引区，不属于任何条目）。
     /// 指向的对象只在本次回调期间有效，实现方要用的话必须自己拷贝。
@@ -43,11 +43,11 @@ struct WarnInfo {
 
 /// 任务结束。
 struct ResultInfo {
-    Status status = Status::kOk;
-    uint64_t entries_done = 0;
+    Status status = Status::kOk;   ///< 最终状态，对应退出码
+    uint64_t entries_done = 0;     ///< 成功处理的条目数
     uint64_t entries_skipped = 0;  ///< 发了 warn 并跳过的条目数
-    uint64_t bytes_read = 0;
-    uint64_t bytes_written = 0;
+    uint64_t bytes_read = 0;       ///< 读入的字节数
+    uint64_t bytes_written = 0;    ///< 写出的字节数
 };
 
 /// 引擎向外汇报进度，并询问是否该停下来。
@@ -79,12 +79,16 @@ class IProgressObserver {
 public:
     virtual ~IProgressObserver() = default;
 
+    /// 任务开始时调用一次。
     virtual void OnStart(const StartInfo&) {}
+    /// 每处理完一块数据、每个条目结束时调用。
     virtual void OnProgress(const ProgressInfo&) {}
     /// 准备/收尾阶段进度，不改变 OnStart 的文件总量及 OnProgress 的传输语义。
     /// phase 为 scan/read-index/prepare/finalize/metadata；总量为 0 时尚未知。
     virtual void OnPhase(const std::string&, const ProgressInfo&) {}
+    /// 遇到可跳过的问题时调用，流程继续。
     virtual void OnWarn(const WarnInfo&) {}
+    /// 任务结束时调用一次。
     virtual void OnResult(const ResultInfo&) {}
 
     /// 返回 true 时引擎应尽快停止。默认永不取消。

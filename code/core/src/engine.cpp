@@ -31,38 +31,50 @@ public:
     CancelledByUser() : std::runtime_error("cancelled by user") {}
 };
 
-/// 统计流过的字节数，其余原样转发。用来算每个条目在打包器输出流里的
-/// 偏移和长度。
-// 插在打包器和 Stage 链之间，数打包器吐出了多少字节。
-//
-// 这是 data_offset / stored_size 的计量口径：打包器输出流里的位置，
-// 不是容器文件里的物理偏移。放在链头而不是链尾，正是为了绕开 Stage
-// 的内部缓冲——压缩器可能攒着几十 KB 不吐，链尾的计数跟条目边界对不上。
+/// 计数用的直通管道：写进来的字节原样转发给下游，同时累计总数。
+///
+/// 插在打包器和 Stage 链之间，用来算每个条目的 data_offset / stored_size。
+/// 计量口径是"打包器输出流里的位置"，不是容器文件里的物理偏移——
+/// 放在链头而不是链尾，正是为了绕开 Stage 的内部缓冲：压缩器可能攒着
+/// 几十 KB 不吐，在链尾计数的话跟条目边界对不上。
 class CountingSink : public ISink {
 public:
+    /// @param downstream 真正接收数据的下游，必须比本对象活得久。
     explicit CountingSink(ISink* downstream) : downstream_(downstream) {}
 
+    /// 转发给下游，再把长度累加进计数。
     void Write(const uint8_t* data, size_t len) override {
         downstream_->Write(data, len);
         count_ += len;
     }
 
+    /// 到目前为止一共流过了多少字节。
     uint64_t Count() const { return count_; }
 
 private:
-    ISink* downstream_;
-    uint64_t count_ = 0;
+    ISink* downstream_;   ///< 下游，不归本对象管
+    uint64_t count_ = 0;  ///< 累计字节数
 };
 
-/// 索引仍由 C++ 流式解码；向界面报告原始索引区的读取进度。
+/// 给索引区的读取加上进度上报的包装层。
+///
+/// 还原和列出内容之前都要先把整个索引区读完、解密、解析。包很大或者加了
+/// 密的时候这一步要花好几秒，界面需要知道"正在读索引、读到哪了"，否则
+/// 看起来像卡死。本类只做两件事：原样转发读取，顺手报告读了多少字节。
 class IndexProgressSource : public ISource {
 public:
+    /// @param source   真正的索引区数据来源，必须比本对象活得久。
+    /// @param total    索引区总字节数，用来算百分比。
+    /// @param observer 进度接收方，可以为 nullptr（此时只转发不上报）。
     IndexProgressSource(ISource* source, uint64_t total, IProgressObserver* observer)
         : source_(source), observer_(observer) {
         progress_.total_bytes = total;
+        // 一开始就报一次 0%，界面立刻切到"读取索引"阶段。
         if (observer_) observer_->OnPhase("read-index", progress_);
     }
 
+    /// 转发一次读取并上报进度。用户取消时返回 0，假装流已结束，
+    /// 上层的解析会因为数据不完整而失败退出。
     size_t Read(uint8_t* data, size_t len) override {
         if (observer_ && observer_->IsCancelled()) return 0;
         const size_t got = source_->Read(data, len);
@@ -72,25 +84,32 @@ public:
     }
 
 private:
-    ISource* source_;
-    IProgressObserver* observer_;
-    ProgressInfo progress_;
+    ISource* source_;              ///< 被包装的数据来源
+    IProgressObserver* observer_;  ///< 进度接收方，可能为空
+    ProgressInfo progress_;        ///< 累计的读取进度
 };
 
-/// 硬链接的身份。同一个文件实体的多个目录项，这三个值完全相同。
+/// 硬链接的身份证：同一个文件实体的多个目录项（多个名字），这两个值完全相同。
 ///
-/// 来自 GetFileInformationByHandle。硬链接不能跨卷，所以卷序列号也必须
-/// 进键——两个不同卷上的文件完全可能撞上同一个文件索引。
+/// 来自 GetFileInformationByHandle。文件索引号由 nFileIndexHigh 和
+/// nFileIndexLow 拼成 64 位。卷序列号也必须进键——文件索引号只在一个卷内
+/// 唯一，两个不同卷上的文件完全可能撞上同一个索引号。
 struct HardlinkKey {
-    uint32_t volume_serial = 0;
-    uint64_t file_index = 0;
+    uint32_t volume_serial = 0;  ///< 卷序列号（dwVolumeSerialNumber）
+    uint64_t file_index = 0;     ///< 文件索引号，卷内唯一
 
+    /// std::map 按键排序查找，需要一个严格的大小关系：先比卷，再比索引号。
     bool operator<(const HardlinkKey& other) const {
         if (volume_serial != other.volume_serial) return volume_serial < other.volume_serial;
         return file_index < other.file_index;
     }
 };
 
+/// 发一条告警事件。告警表示"这一条出了可预期的问题，已经跳过，整体继续"，
+/// 最终会让退出码变成 1（部分成功）。observer 为空时什么都不做。
+///
+/// @param path      出问题的条目的相对路径；不针对具体条目时传空串。
+/// @param win_error GetLastError() 的原值，跟 Win32 无关时传 0。
 void Warn(IProgressObserver* observer, const std::wstring& path, const std::wstring& message,
           uint32_t win_error) {
     if (observer == nullptr) return;
@@ -101,6 +120,7 @@ void Warn(IProgressObserver* observer, const std::wstring& path, const std::wstr
     observer->OnWarn(warn);
 }
 
+/// 用户是否请求了取消。没有 observer 就永远不取消。
 bool IsCancelled(IProgressObserver* observer) {
     return observer != nullptr && observer->IsCancelled();
 }
@@ -117,19 +137,25 @@ EngineResult Fail(Status status, const std::wstring& message) {
     return result;
 }
 
-/// 按名字建一串 Stage。
+/// 按名字从注册表里建出一串 Stage（压缩 / 加密算法的实例）。
 ///
-/// @param inverse true 时建逆变换，并且**顺序也要反过来**——写的时候是
-///                先压缩后加密，读的时候就得先解密后解压。
-// 每次调用都造一套全新的 Stage 实例。
-//
-// 绝对不能复用：压缩器和加密器都是有状态的（余料缓冲、CBC 链接向量、
-// 霍夫曼码表）。拿写完数据区的那一套接着写索引区，解的时候是解不出来的，
-// 而且错得很隐蔽——数据区能解开，偏偏索引区解出乱码。
+/// 每次调用都造一套**全新**的实例，绝对不能复用：压缩器和加密器都是有
+/// 状态的（余料缓冲、CBC 链接向量、霍夫曼码表）。拿写完数据区的那一套
+/// 接着写索引区，解的时候是解不出来的，而且错得很隐蔽——数据区能解开，
+/// 偏偏索引区解出乱码。
+///
+/// @param names    算法名，按写入时的应用顺序（压缩在前、加密在后）。
+/// @param inverse  true 时建逆变换（解压 / 解密），并且**顺序也要反过来**——
+///                 写的时候先压缩后加密，读的时候就得先解密后解压。
+/// @param password 加密算法需要的密码；没用加密算法时可以为空。
+/// @param out      建好的实例按顺序追加到这里。
+/// @param error    失败时写入给用户看的原因。
+/// @return 有算法名不认识、实例建不出来、或者加密却没给密码时返回 false。
 bool BuildStages(const std::vector<std::string>& names, bool inverse, const std::string& password,
                  std::vector<std::unique_ptr<IStage>>* out, std::wstring* error) {
     const StageRegistry& registry = StageRegistry::Instance();
     std::vector<std::string> ordered = names;
+    // 还原方向要倒序：写入时最后套上的那层（加密）得最先剥掉。
     if (inverse) std::reverse(ordered.begin(), ordered.end());
 
     for (const std::string& name : ordered) {
@@ -144,6 +170,7 @@ bool BuildStages(const std::vector<std::string>& names, bool inverse, const std:
             *error = L"算法 " + FromUtf8(name) + L" 创建失败";
             return false;
         }
+        // 加密 / 解密算法拿空密码跑出来的东西没有意义，提前拦下。
         if (factory->Kind() == StageKind::kEncrypt && password.empty()) {
             *error = L"此操作需要密码，请填写归档密码";
             return false;
@@ -163,12 +190,14 @@ bool BuildStages(const std::vector<std::string>& names, bool inverse, const std:
 bool StreamFileContent(HANDLE handle, IPacker* packer, ISink& out, IProgressObserver* observer,
                        const EntryMeta& meta, uint64_t* actual_size, uint32_t* crc,
                        ProgressInfo* progress) {
+    // 固定 64 KB 缓冲反复读，任何情况下都不把整个文件读进内存。
     std::vector<uint8_t> buffer(kIoBlockSize);
-    Crc32 checksum;
-    uint64_t total = 0;
+    Crc32 checksum;      // 边读边算校验和，不用把文件读第二遍
+    uint64_t total = 0;  // 实际读到的字节数（文件可能在备份期间被改过）
 
     for (;;) {
         DWORD got = 0;
+        // 读失败（文件被锁定的区段、网络盘断开、磁盘坏道）：发告警、放弃这一条。
         if (ReadFile(handle, buffer.data(), static_cast<DWORD>(buffer.size()), &got, nullptr) ==
             0) {
             Warn(observer, meta.relative_path,
@@ -176,8 +205,9 @@ bool StreamFileContent(HANDLE handle, IPacker* packer, ISink& out, IProgressObse
                  GetLastError());
             return false;
         }
-        if (got == 0) break;
+        if (got == 0) break;  // 读到 0 字节就是到文件尾了
 
+        // 同一块数据：算进校验和、交给打包器写进容器、累加长度。
         checksum.Update(buffer.data(), got);
         packer->WriteData(buffer.data(), got, out);
         total += got;
@@ -198,27 +228,29 @@ bool StreamFileContent(HANDLE handle, IPacker* packer, ISink& out, IProgressObse
 
 // ---------------------------------------------------------------- 还原侧
 
-/// 按正确顺序把元数据写回一个已经存在的对象上：时间戳 -> ACL -> 属性位。
+/// 按固定顺序把元数据写回一个已经存在的对象：时间戳 → 属主与 DACL → 属性位。
 ///
 /// 顺序是硬性的，不是风格问题：
-///   · 属性位必须最后。只读位一旦设上，设时间戳和设 ACL 都会失败，
+///   · 属性位必须最后。只读位一旦设上，再设时间戳和 ACL 都会失败，
 ///     而且失败得很安静——只是元数据没生效，没人会注意到。
-///   · ACL 排在时间戳之后，是因为改 ACL 本身不会动时间戳，反过来不成立。
+///   · 时间戳排在 ACL 之前。还原出来的 DACL 可能比当前更严，设完之后
+///     当前进程未必还有改时间戳的权限。
 ///
-/// 文件在 Pass 2 结束时调，目录在 Pass 3 逆序调。
-// 每一步失败都只 warn、不中断。
-//
-// 元数据设不上通常是权限问题（没有 SeRestorePrivilege、目标卷不支持 ACL），
-// 这类失败是可预期的。为了一个时间戳设不上就让整个还原失败，等于把
-// "还原出 99% 的正确数据"变成"什么都没有"，对用户是净损失。
+/// 每一步失败都只发告警、不中断：元数据设不上通常是权限问题（没有
+/// SeRestorePrivilege、目标卷不支持 ACL），属于可预期的失败。为了一个时间戳
+/// 设不上就让整个还原失败，等于把"还原出 99% 的正确数据"变成"什么都没有"。
+///
+/// 文件在 Pass 2 写完内容后调用，目录在 Pass 3 逆序调用。
 void ApplyEntryMetadata(const std::wstring& absolute, const EntryMeta& entry,
                         IProgressObserver* observer) {
     uint32_t error = 0;
+    // ① 创建、访问、修改三个时间戳。
     if (!ApplyTimestamps(absolute, entry, true, &error)) {
         Warn(observer, entry.relative_path, L"时间戳设置失败：" + platform::FormatWinError(error),
              error);
     }
 
+    // ② 属主、属组、DACL（备份时存成了一串 SDDL 文本）。
     bool owner_skipped = false;
     if (!ApplySecurityDescriptor(absolute, entry.sddl, &owner_skipped, &error)) {
         Warn(observer, entry.relative_path, L"权限设置失败：" + platform::FormatWinError(error),
@@ -233,12 +265,21 @@ void ApplyEntryMetadata(const std::wstring& absolute, const EntryMeta& entry,
              error);
     }
 
+    // ③ 属性位（只读、隐藏等），必须最后。
     if (!ApplyAttributes(absolute, entry, &error)) {
         Warn(observer, entry.relative_path, L"属性位设置失败：" + platform::FormatWinError(error),
              error);
     }
 }
 
+/// 确保某个路径上有一个目录：不存在就建，已经是目录就当成功。
+///
+/// 已存在但**是个文件**时返回失败（ERROR_DIRECTORY）——不能把文件当目录用，
+/// 否则后面往里写子项会全部失败，而且报错会很莫名其妙。
+///
+/// 只建这一级，不递归建父目录。正常流程里父目录在 Pass 1 已经按顺序建好了。
+///
+/// @param win_error 失败时写入错误码，可为 nullptr。
 bool EnsureDirectory(const std::wstring& path, uint32_t* win_error) {
     const std::wstring extended = platform::ToExtendedPath(path);
     if (CreateDirectoryW(extended.c_str(), nullptr) != 0) return true;
@@ -255,16 +296,18 @@ bool EnsureDirectory(const std::wstring& path, uint32_t* win_error) {
     return false;
 }
 
+/// 路径上是否已经有东西（文件、目录、链接都算）。
 bool PathExists(const std::wstring& path) {
     return GetFileAttributesW(platform::ToExtendedPath(path).c_str()) != INVALID_FILE_ATTRIBUTES;
 }
 
-/// kRename 策略下找一个还没被占用的名字："a.txt" -> "a (1).txt"。
-// 在扩展名之前插序号，不是简单往后拼。
-//
-// "报告.txt" 要变成 "报告 (1).txt" 而不是 "报告.txt (1)"——后者会让文件
-// 失去扩展名关联，双击打不开。判断扩展名时要确认那个点在最后一个路径
-// 分隔符**之后**，否则 "D:/a.b/c" 这种目录名带点的路径会被切错。
+/// --overwrite rename 策略下，找一个还没被占用的名字："a.txt" → "a (1).txt"。
+///
+/// 序号插在扩展名**之前**，不是简单往后拼："报告.txt (1)" 会让文件失去
+/// 扩展名关联，双击打不开。判断扩展名时要确认那个点在最后一个路径分隔符
+/// **之后**，否则 "D:/a.b/c" 这种目录名带点的路径会被切错。
+///
+/// 依次试 (1)、(2)……直到找到空位；一万个都被占了就原样返回，交给调用方失败。
 std::wstring FindFreeName(const std::wstring& path) {
     const size_t slash = path.find_last_of(L'\\');
     const size_t dot = path.find_last_of(L'.');
@@ -280,9 +323,17 @@ std::wstring FindFreeName(const std::wstring& path) {
     return path;  // 一万个重名，放弃挣扎
 }
 
-/// Pass 2 的状态机：打包器一条一条吐条目，这里负责落盘。
+/// 还原第二趟（Pass 2）的执行者：解包器每解出一个条目、每吐出一块内容，
+/// 都回调到这里，由它负责在目标目录里把东西建出来。
+///
+/// 它是一个状态机，因为解包器的回调是"条目头 → 若干块内容 → 下一个条目头"
+/// 这样交替来的：BeginEntry 时打开目标文件，WriteData 往里写，下一次
+/// BeginEntry（或最后的 FinishCurrent）时关闭文件并设元数据。
 class RestoreSink {
 public:
+    /// @param options  还原选项，必须比本对象活得久。
+    /// @param observer 进度与告警的接收方，可以为 nullptr。
+    /// @param result   计数（成功几条、跳过几条、写了多少字节）直接累加到这里。
     RestoreSink(const RestoreOptions& options, IProgressObserver* observer, EngineResult* result)
         : options_(options), observer_(observer), result_(result) {}
 
@@ -291,9 +342,15 @@ public:
     /// original_size 是遍历时的旧值、crc32 是 0。按 id 用索引里的覆盖回来。
     void UseIndexAsAuthority(const std::map<uint64_t, const EntryMeta*>* index) { index_ = index; }
 
+    /// 开始处理一个新条目：先把上一条收尾，再按类型分别处理。
+    ///
+    /// 会做一道一致性校验：数据区里解出来的条目必须能在索引里按 id 找到，
+    /// 而且路径和类型都对得上。对不上说明包被篡改或损坏了，直接抛异常中止
+    /// 整个还原——继续下去可能把文件写到错误的位置。
     void BeginEntry(const EntryMeta& meta) {
         FinishCurrent();
         current_ = meta;
+        // 用索引里的权威版本替换数据区里的那份（原因见 UseIndexAsAuthority）。
         if (index_ != nullptr) {
             const auto it = index_->find(meta.id);
             if (it == index_->end() || it->second->relative_path != meta.relative_path ||
@@ -306,6 +363,7 @@ public:
         writing_ = false;
         content_crc_.Reset();
 
+        // 每个条目开始时报一次进度、查一次取消。
         if (observer_ != nullptr) {
             progress_.done_entries = result_->entries_done;
             progress_.current = &current_;
@@ -313,6 +371,8 @@ public:
             if (observer_->IsCancelled()) throw CancelledByUser();
         }
 
+        // 按类型分派。普通文件这里只是打开目标，真正的写入在后续的 WriteData 里；
+        // 其它类型没有内容，在这里就一步处理完。
         switch (meta.type) {
             case FileType::kRegular: OpenRegularFile(); break;
             case FileType::kDirectory:
@@ -327,12 +387,15 @@ public:
         }
     }
 
+    /// 把当前条目的一块内容写进目标文件，并累计校验和与进度。
     void WriteData(const uint8_t* data, size_t len) {
         // writing_ 为假说明这条在 BeginEntry 时就被跳过了（目标已存在、
         // 建文件失败、类型不支持）。数据还会照常流过来——打包器不知道
         // 上层的取舍——这里静默丢掉就行，warn 在跳过时已经发过了。
         if (!writing_ || !handle_.IsValid()) return;
         size_t done = 0;
+        // WriteFile 允许"部分写入"，循环到这一块全部写完。
+        // 单次最多 1 GB，避免 size_t 转 DWORD 时被截断。
         while (done < len) {
             const DWORD chunk = static_cast<DWORD>(std::min<size_t>(len - done, 1u << 30));
             DWORD written = 0;
@@ -356,7 +419,11 @@ public:
         }
     }
 
-    /// 收尾最后一条。
+    /// 收尾当前条目：关闭文件、核对校验和、设元数据。
+    ///
+    /// 每次 BeginEntry 开头会调一次（收尾上一条），全部解包完之后还要
+    /// 再手动调一次（收尾最后一条）。只有普通文件需要收尾，其它类型在
+    /// BeginEntry 里就已经处理完了。
     void FinishCurrent() {
         if (!has_current_ || !writing_) {
             writing_ = false;
@@ -372,6 +439,7 @@ public:
             ++result_->entries_skipped;
         }
 
+        // --no-metadata 时只还原内容，不动时间戳、权限、属性。
         if (options_.restore_metadata) {
             ApplyEntryMetadata(target_path_, current_, observer_);
         }
@@ -379,12 +447,14 @@ public:
         writing_ = false;
     }
 
+    /// 设置进度的分母（总条目数、总字节数），供界面算百分比。
     void SetTotals(uint64_t entries, uint64_t bytes) {
         progress_.total_entries = entries;
         progress_.total_bytes = bytes;
     }
 
 private:
+    /// 跳过当前条目：发一条告警并计入"跳过"数，最终退出码会变成 1。
     void Skip(const std::wstring& reason) {
         Warn(observer_, current_.relative_path, reason, 0);
         ++result_->entries_skipped;
@@ -422,6 +492,7 @@ private:
         return true;
     }
 
+    /// 普通文件：准备好目标路径，新建（或截断）目标文件，等后续 WriteData 往里写。
     void OpenRegularFile() {
         if (!PrepareTargetPath()) return;
 
@@ -435,6 +506,8 @@ private:
         writing_ = true;
     }
 
+    /// 符号链接：按备份时记录的原始目标字符串重建，文件链接和目录链接分开处理。
+    /// 没权限建时降级成空占位并告警，不中断整个还原。
     void RestoreSymlink() {
         if (!PrepareTargetPath()) return;
         if (current_.link_target.empty()) {
@@ -470,6 +543,7 @@ private:
         }
     }
 
+    /// 目录联接（junction）：先建空目录再写入重解析点数据。不需要管理员权限。
     void RestoreJunction() {
         if (!PrepareTargetPath()) return;
         if (current_.link_target.empty()) {
@@ -488,6 +562,8 @@ private:
         ++result_->entries_skipped;
     }
 
+    /// 硬链接：让目标路径成为"被指向的那个已还原文件"的另一个名字。
+    /// 跨卷建不了时降级为复制一份内容，并告警说明二者不再是同一实体。
     void RestoreHardlink() {
         if (index_ == nullptr) {
             Skip(L"没有索引，找不到硬链接指向的条目");
@@ -529,24 +605,29 @@ private:
         ++result_->entries_skipped;
     }
 
-    const RestoreOptions& options_;
-    IProgressObserver* observer_;
-    EngineResult* result_;
+    const RestoreOptions& options_;  ///< 还原选项（目标目录、覆盖策略等）
+    IProgressObserver* observer_;    ///< 进度与告警的接收方，可能为空
+    EngineResult* result_;           ///< 计数结果，直接累加
 
+    /// id → 索引里的权威条目，用来校验和覆盖数据区里的条目头。
     const std::map<uint64_t, const EntryMeta*>* index_ = nullptr;
-    EntryMeta current_;
-    std::wstring target_path_;
-    platform::ScopedHandle handle_;
-    Crc32 content_crc_;
-    ProgressInfo progress_;
-    bool has_current_ = false;
-    bool writing_ = false;
+    EntryMeta current_;              ///< 正在处理的条目
+    std::wstring target_path_;       ///< 当前条目在目标目录里的绝对路径
+    platform::ScopedHandle handle_;  ///< 当前普通文件的写入句柄
+    Crc32 content_crc_;              ///< 当前文件已写内容的校验和
+    ProgressInfo progress_;          ///< 累计进度
+    bool has_current_ = false;       ///< 是否已经开始过至少一个条目
+    bool writing_ = false;           ///< 当前条目是否是一个正在写入的普通文件
 };
 
 }  // namespace
 
 // ============================================================ RunBackup
 
+// 完整的设计说明见 cbk/engine.h。这里按顺序做五件事：
+//   ① 校验参数                  ② 遍历源目录，得到条目表
+//   ③ 打开容器，逐条把内容经流水线写进数据区
+//   ④ 把条目表写进索引区        ⑤ 回填文件头、写校验块、关闭
 EngineResult RunBackup(const BackupOptions& options, IProgressObserver* observer) {
     // ---- 参数校验。这些错都是调用方（通常是 GUI）的 bug，退出码 3。----
     if (options.source_root.empty() || options.dest_archive.empty()) {
@@ -556,6 +637,7 @@ EngineResult RunBackup(const BackupOptions& options, IProgressObserver* observer
         return Fail(Status::kBadArgs, L"没有名为 " + FromUtf8(options.packer) +
                                           L" 的打包算法。用 cbk info 看看支持哪些。");
     }
+    // 每个算法名都必须认识；用了加密算法就必须给密码。
     for (const std::string& name : options.stages) {
         const auto* factory = StageRegistry::Instance().Find(name);
         if (factory != nullptr && factory->Kind() == StageKind::kEncrypt &&
@@ -567,6 +649,7 @@ EngineResult RunBackup(const BackupOptions& options, IProgressObserver* observer
                         L"没有名为 " + FromUtf8(name) + L" 的算法。用 cbk info 看看支持哪些。");
         }
     }
+    // 顺序必须是"压缩在前、加密在后"。
     if (!ValidatePipelineOrder(options.stages)) {
         return Fail(Status::kBadArgs,
                     L"流水线顺序不合法：压缩必须排在加密之前。密文是高熵数据，"
@@ -575,11 +658,15 @@ EngineResult RunBackup(const BackupOptions& options, IProgressObserver* observer
 
     EngineResult result;
 
-    // 拿不到特权不是致命错误，降级跑就是了——只是遇到没权限的文件会跳过。
+    // 告诉界面进入"扫描"阶段。
     if (observer != nullptr) observer->OnPhase("scan", ProgressInfo{});
+    // 尝试启用备份特权（绕过 ACL 读取无权访问的文件）。拿不到不是致命错误，
+    // 降级跑就是了——只是遇到没权限的文件会跳过。
     platform::EnableBackupPrivileges();
 
-    // ---- 遍历 ----
+    // ---- 备份文件不能放在源目录里面 ----
+    // 否则遍历时会把正在写的备份文件自己也扫进去，一边写一边备份自己。
+    // 两个路径都转成扩展格式再比，大小写不敏感（Windows 路径不区分大小写）。
     const std::wstring root = platform::NormalizePath(options.source_root);
     const std::wstring source_path = platform::ToExtendedPath(root);
     const std::wstring destination = platform::ToExtendedPath(options.dest_archive);
@@ -593,10 +680,12 @@ EngineResult RunBackup(const BackupOptions& options, IProgressObserver* observer
     if (same_path || inside_source) {
         return Fail(Status::kBadArgs, L"备份文件必须保存在源目录以外");
     }
+    // ---- 遍历：把整棵树摊平成条目表 ----
     std::vector<EntryMeta> entries;
     ScanStats stats;
     ProgressInfo scan_progress;
     {
+        // 每找到一个条目就存进 entries，同时向界面报告扫描进度。
         Scanner scanner(root, ScanOptions{options.follow_symlinks}, observer);
         const Status scan_status = scanner.Scan(
             [&](const EntryMeta& meta) {
@@ -607,6 +696,7 @@ EngineResult RunBackup(const BackupOptions& options, IProgressObserver* observer
                 if (observer != nullptr) observer->OnPhase("scan", scan_progress);
             },
             &stats);
+        // 根目录打不开或被取消：整个备份失败。有条目被跳过：记为部分成功，继续。
         if (scan_status == Status::kFailed) {
             if (IsCancelled(observer)) return Fail(Status::kFailed, L"已取消");
             return Fail(Status::kFailed, L"无法遍历源目录 " + root);
@@ -614,6 +704,7 @@ EngineResult RunBackup(const BackupOptions& options, IProgressObserver* observer
         if (scan_status == Status::kPartial) result.status = Status::kPartial;
     }
 
+    // 遍历完就知道总量了，通知界面画进度条。
     if (observer != nullptr) {
         StartInfo start;
         start.total_entries = entries.size();
@@ -631,12 +722,14 @@ EngineResult RunBackup(const BackupOptions& options, IProgressObserver* observer
     const Status open_status = writer.Open(options.dest_archive, root, pipeline, &error);
     if (open_status != Status::kOk) return Fail(open_status, error);
 
+    // 按用户选的打包格式建打包器（默认 cbk-native）。
     std::unique_ptr<IPacker> packer = PackerRegistry::Instance().Create(options.packer);
     if (packer == nullptr) return Fail(Status::kFailed, L"打包器创建失败");
 
+    // 真正写进去的条目（跳过的不算），最后整张写进索引区。
     std::vector<EntryMeta> written;
     written.reserve(entries.size());
-    uint64_t total_original = 0;
+    uint64_t total_original = 0;  // 所有文件的原始字节数之和，记进文件头
 
     // 硬链接去重表。**只对 nNumberOfLinks > 1 的文件建表项**——几万个普通
     // 文件全塞进去纯属浪费，而链接数是开句柄时顺手就有的，不额外花系统调用。
@@ -648,6 +741,7 @@ EngineResult RunBackup(const BackupOptions& options, IProgressObserver* observer
         if (!BuildStages(options.stages, false, options.password, &stages, &error)) {
             return Fail(Status::kBadArgs, error);
         }
+        // 组装写入链：打包器 → 计数器 → 压缩 → 加密 → 容器的数据区。
         StageChainSink chain(std::move(stages), &writer.DataSink());
         CountingSink counter(&chain.Entry());
 
@@ -655,6 +749,7 @@ EngineResult RunBackup(const BackupOptions& options, IProgressObserver* observer
         progress.total_entries = entries.size();
         progress.total_bytes = stats.total_bytes;
 
+        // 逐条处理。每条开始前查一次取消、报一次进度。
         for (EntryMeta& entry : entries) {
             if (IsCancelled(observer)) throw CancelledByUser();
 
@@ -663,6 +758,7 @@ EngineResult RunBackup(const BackupOptions& options, IProgressObserver* observer
             if (observer != nullptr) observer->OnProgress(progress);
 
             const std::wstring absolute = platform::JoinPath(root, entry.relative_path);
+            // 记下这一条在打包输出流里从哪开始。
             entry.data_offset = counter.Count();
 
             if (entry.type == FileType::kRegular) {
@@ -716,11 +812,15 @@ EngineResult RunBackup(const BackupOptions& options, IProgressObserver* observer
                     }
                 }
 
+                // 普通文件（或一组硬链接里第一次遇到的那个）：
+                // 写条目头 → 流式写内容 → 写结束标记。
                 packer->BeginEntry(entry, counter);
                 uint64_t actual = 0;
                 uint32_t crc = 0;
                 if (!StreamFileContent(handle.Get(), packer.get(), counter, observer, entry,
                                        &actual, &crc, &progress)) {
+                    // 读到一半失败：补上结束标记，保持数据区格式完整；
+                    // 这一条记为跳过，不进索引。
                     packer->EndEntry(counter);
                     ++result.entries_skipped;
                     result.status = Status::kPartial;
@@ -740,15 +840,18 @@ EngineResult RunBackup(const BackupOptions& options, IProgressObserver* observer
                 // 后面的硬链接就会指向一条根本不在索引里的 id。
                 if (multi_linked) hardlinks.emplace(key, entry.id);
             } else {
+                // 目录、链接等：只有条目头，没有内容。
                 packer->BeginEntry(entry, counter);
                 packer->EndEntry(counter);
             }
 
+            // 这一条在打包输出流里占了多少字节，然后登记进索引表。
             entry.stored_size = counter.Count() - entry.data_offset;
             written.push_back(entry);
             ++result.entries_done;
         }
 
+        // 数据区收尾：打包器写结束信息 → 各 Stage 冲刷内部缓冲 → 容器切到索引区。
         if (observer != nullptr) observer->OnPhase("finalize", ProgressInfo{});
         packer->Finish(counter);
         chain.Finish();
@@ -765,19 +868,23 @@ EngineResult RunBackup(const BackupOptions& options, IProgressObserver* observer
         WriteIndex(written, index_chain.Entry());
         index_chain.Finish();
     } catch (const CancelledByUser&) {
+        // 用户取消：删掉写了一半的备份文件。残缺的 .cbk 看着像能用的备份，比没有更糟。
         Warn(observer, std::wstring(), L"用户取消了备份，半成品已删除", 0);
         writer.Abort();
         return Fail(Status::kFailed, L"已取消");
     }
 
+    // 回填文件头、写校验块、刷盘关闭。
     const Status close_status = writer.Close(written.size(), total_original, &error);
     if (close_status != Status::kOk) return Fail(close_status, error);
 
     result.bytes_written = writer.DataBytesWritten();
+    // 有任何条目被跳过，整体就是"部分成功"（退出码 1）。
     if (result.entries_skipped > 0 && result.status == Status::kOk) {
         result.status = Status::kPartial;
     }
 
+    // 报告最终结果。
     if (observer != nullptr) {
         ResultInfo info;
         info.status = result.status;
@@ -792,12 +899,16 @@ EngineResult RunBackup(const BackupOptions& options, IProgressObserver* observer
 
 // ============================================================ RunRestore
 
+// 完整的设计说明（为什么分三趟）见 cbk/engine.h。这里的步骤是：
+//   ① 打开容器、读出索引        ② Pass 1：建出所有目录
+//   ③ Pass 2：顺序解包，逐条落盘 ④ Pass 3：逆序给目录设元数据
 EngineResult RunRestore(const RestoreOptions& options, IProgressObserver* observer) {
     if (options.archive.empty() || options.dest_root.empty()) {
         return Fail(Status::kBadArgs, L"--archive 和 --dest 都不能为空");
     }
 
     if (observer != nullptr) observer->OnPhase("read-index", ProgressInfo{});
+    // 打开容器：校验魔数、版本、布局，读出文件头和流水线描述。
     std::wstring error;
     ArchiveReader reader;
     if (reader.Open(options.archive, &error) != Status::kOk) {
@@ -805,6 +916,7 @@ EngineResult RunRestore(const RestoreOptions& options, IProgressObserver* observ
     }
     const ArchiveHeader& header = reader.Header();
 
+    // 按包里记录的打包格式建解包器。本程序不认识这种格式就没法还原。
     std::unique_ptr<IPacker> packer = PackerRegistry::Instance().Create(header.pipeline.packer);
     if (packer == nullptr) {
         return Fail(Status::kFailed, L"这个包用 " + FromUtf8(header.pipeline.packer) +
@@ -820,8 +932,10 @@ EngineResult RunRestore(const RestoreOptions& options, IProgressObserver* observ
         if (!BuildStages(header.pipeline.stages, true, options.password, &stages, &error)) {
             return Fail(Status::kFailed, error);
         }
+        // 读取链：原始索引区 → 进度上报 → 解密 → 解压 → 解析成条目表。
         IndexProgressSource index_progress(raw.get(), header.index_size, observer);
         StageChainSource chain(&index_progress, std::move(stages));
+        // 密码不对时解密出来的是乱码，解析会抛异常或失败，统一报"密码错误或已损坏"。
         bool index_ok = false;
         try {
             index_ok = ReadIndex(chain, header.entry_count, &entries);
@@ -834,15 +948,18 @@ EngineResult RunRestore(const RestoreOptions& options, IProgressObserver* observ
         }
     }
 
+    // 尝试启用还原特权（设置任意属主、绕过 ACL 写入）。拿不到就降级运行。
     platform::EnableBackupPrivileges();
 
     EngineResult result;
     uint32_t win_error = 0;
+    // 先确保目标根目录存在。
     if (!EnsureDirectory(platform::NormalizePath(options.dest_root), &win_error)) {
         return Fail(Status::kFailed, L"无法创建目标目录：" + platform::FormatWinError(win_error));
     }
     const std::wstring dest = platform::NormalizePath(options.dest_root);
 
+    // 通知界面开始还原，并报出总量。
     if (observer != nullptr) {
         StartInfo start;
         start.total_entries = entries.size();
@@ -862,6 +979,7 @@ EngineResult RunRestore(const RestoreOptions& options, IProgressObserver* observ
         preparation.current = &entry;
         ++preparation.done_entries;
         if (observer != nullptr) observer->OnPhase("prepare", preparation);
+        // 这一趟只处理目录，其它类型留给 Pass 2。
         if (entry.type != FileType::kDirectory) continue;
         const std::wstring absolute = platform::JoinPath(dest, entry.relative_path);
         if (!EnsureDirectory(absolute, &win_error)) {
@@ -870,6 +988,7 @@ EngineResult RunRestore(const RestoreOptions& options, IProgressObserver* observ
             ++result.entries_skipped;
             continue;
         }
+        // 记下来，Pass 3 要倒着给它们设元数据。
         directories.push_back(&entry);
     }
 
@@ -879,6 +998,7 @@ EngineResult RunRestore(const RestoreOptions& options, IProgressObserver* observ
     RestoreSink sink(effective, observer, &result);
     sink.SetTotals(entries.size(), header.total_original_bytes);
 
+    // 建一张 id → 索引条目的查找表，供 RestoreSink 校验和覆盖数据区里的条目头。
     std::map<uint64_t, const EntryMeta*> index_by_id;
     for (const EntryMeta& entry : entries) index_by_id[entry.id] = &entry;
     sink.UseIndexAsAuthority(&index_by_id);
@@ -890,16 +1010,19 @@ EngineResult RunRestore(const RestoreOptions& options, IProgressObserver* observ
         if (!BuildStages(header.pipeline.stages, true, options.password, &stages, &error)) {
             return Fail(Status::kFailed, error);
         }
+        // 读取链：原始数据区 → 解密 → 解压；解包器从链尾拉数据。
         StageChainSource chain(raw.get(), std::move(stages));
 
+        // 解包器每解出一个条目头就回调 BeginEntry，每吐出一块内容就回调 WriteData。
         packer->Unpack(
             chain, [&sink](const EntryMeta& meta) { sink.BeginEntry(meta); },
             [&sink](const uint8_t* data, size_t len) { sink.WriteData(data, len); });
-        sink.FinishCurrent();
+        sink.FinishCurrent();  // 收尾最后一个条目
     } catch (const CancelledByUser&) {
         Warn(observer, std::wstring(), L"用户取消了还原，已还原的部分保留在目标目录里", 0);
         return Fail(Status::kFailed, L"已取消");
     } catch (const std::runtime_error& e) {
+        // 解包器发现数据损坏，或者数据区和索引对不上：整个还原失败。
         return Fail(Status::kFailed, L"解包失败：" + FromUtf8(e.what()));
     }
 
@@ -919,8 +1042,10 @@ EngineResult RunRestore(const RestoreOptions& options, IProgressObserver* observ
         }
     }
 
+    // 有条目被跳过就是部分成功。
     if (result.entries_skipped > 0) result.status = Status::kPartial;
 
+    // 报告最终结果。
     if (observer != nullptr) {
         ResultInfo info;
         info.status = result.status;
@@ -934,6 +1059,9 @@ EngineResult RunRestore(const RestoreOptions& options, IProgressObserver* observ
 
 // ============================================================ list / verify
 
+/// cbk list 的实现：只读文件头和索引区，不碰数据区。
+///
+/// 所以不管备份包有多大，列出内容都很快。索引区如果加了密，同样需要密码。
 Status ReadArchiveListing(const std::wstring& path, const std::string& password, ArchiveInfo* info,
                           std::vector<EntryMeta>* entries, std::wstring* error) {
     ArchiveReader reader;
@@ -941,6 +1069,7 @@ Status ReadArchiveListing(const std::wstring& path, const std::string& password,
     if (status != Status::kOk) return status;
 
     const ArchiveHeader& header = reader.Header();
+    // 把内部的文件头结构转成对外的精简版 ArchiveInfo。
     info->format_version = header.format_version;
     info->source_root = header.source_root;
     info->packer = header.pipeline.packer;
@@ -958,6 +1087,7 @@ Status ReadArchiveListing(const std::wstring& path, const std::string& password,
     if (!BuildStages(header.pipeline.stages, true, password, &stages, error)) {
         return Status::kFailed;
     }
+    // 跟还原时读索引是同一条链：解密 → 解压 → 解析。
     StageChainSource chain(raw.get(), std::move(stages));
     bool index_ok = false;
     try {
@@ -973,6 +1103,7 @@ Status ReadArchiveListing(const std::wstring& path, const std::string& password,
     return Status::kOk;
 }
 
+/// cbk verify 的实现：先做结构检查（Open），再重算三个 CRC32 逐一比对（Verify）。
 Status VerifyArchive(const std::wstring& path, std::wstring* error) {
     ArchiveReader reader;
     const Status status = reader.Open(path, error);

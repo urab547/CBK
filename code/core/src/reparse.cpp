@@ -18,10 +18,12 @@ namespace {
 /// 布局要点：PathBuffer 里连着放两个字符串（SubstituteName 和 PrintName），
 /// 各自的位置由前面那两对 Offset/Length 指出来，单位是**字节不是字符**。
 struct ReparseDataBuffer {
-    ULONG ReparseTag;
-    USHORT ReparseDataLength;
-    USHORT Reserved;
+    ULONG ReparseTag;          ///< 类型标签：符号链接 / junction / 其它
+    USHORT ReparseDataLength;  ///< 标签之后的数据有多少字节
+    USHORT Reserved;           ///< 保留，填 0
+    /// 后面的内容按标签不同有三种解释方式，所以用 union。
     union {
+        /// 符号链接：比 junction 多一个 Flags（记录是否相对路径）。
         struct {
             USHORT SubstituteNameOffset;
             USHORT SubstituteNameLength;
@@ -36,7 +38,8 @@ struct ReparseDataBuffer {
             USHORT PrintNameOffset;
             USHORT PrintNameLength;
             WCHAR PathBuffer[1];
-        } MountPoint;
+        } MountPoint;  ///< junction（挂载点）
+        /// 其它类型的重解析点，只当一串字节看。
         struct {
             UCHAR DataBuffer[1];
         } Generic;
@@ -57,16 +60,16 @@ constexpr ULONG kSymlinkFlagRelative = SYMLINK_FLAG_RELATIVE;
 const wchar_t kNtPrefix[] = L"\\??\\";
 constexpr size_t kNtPrefixLen = 4;
 
+/// 把刚才失败的 Win32 错误码交给调用方（调用方不关心时传 nullptr）。
 void Record(uint32_t* win_error) {
     if (win_error != nullptr) *win_error = GetLastError();
 }
 
 /// 从 PathBuffer 里按字节偏移和字节长度取一个字符串。
-// 从 PathBuffer 里按偏移取一个字符串。
-//
-// 两个字段的单位是**字节不是字符**，所以要除以 sizeof(WCHAR)。按字符
-// 去算是这套结构体最经典的用错方式——路径会被砍成一半长，而且短路径
-// 恰好不出问题，看着像随机故障。
+///
+/// 两个字段的单位是**字节不是字符**，所以要除以 sizeof(WCHAR)。按字符
+/// 去算是这套结构体最经典的用错方式——路径会被砍成一半长，而且短路径
+/// 恰好不出问题，看着像随机故障。
 std::wstring Slice(const WCHAR* path_buffer, USHORT byte_offset, USHORT byte_length) {
     if (byte_length == 0) return std::wstring();
     const WCHAR* start = path_buffer + (byte_offset / sizeof(WCHAR));
@@ -83,6 +86,8 @@ std::wstring StripNtPrefix(const std::wstring& text) {
 
 }  // namespace
 
+/// 读一个重解析点：打开链接本身 → FSCTL_GET_REPARSE_POINT 取原始数据 →
+/// 按标签分三类解析（符号链接 / junction / 不支持）。
 bool ReadReparsePoint(const std::wstring& path, ReparseInfo* out, uint32_t* win_error) {
     // 必须带 FILE_FLAG_OPEN_REPARSE_POINT，否则打开的是链接指向的目标，
     // 拿到的重解析点数据就是目标的（如果目标本身也是链接）或者干脆没有。
@@ -93,6 +98,7 @@ bool ReadReparsePoint(const std::wstring& path, ReparseInfo* out, uint32_t* win_
         return false;
     }
 
+    // 准备一块最大尺寸（16 KB）的缓冲区，让文件系统把重解析数据原样拷进来。
     std::vector<uint8_t> buffer(MAXIMUM_REPARSE_DATA_BUFFER_SIZE);
     DWORD returned = 0;
     if (DeviceIoControl(handle.Get(), FSCTL_GET_REPARSE_POINT, nullptr, 0, buffer.data(),
@@ -100,16 +106,19 @@ bool ReadReparsePoint(const std::wstring& path, ReparseInfo* out, uint32_t* win_
         Record(win_error);
         return false;
     }
+    // 连 8 字节的头都不够，说明数据坏了。
     if (returned < kReparseHeaderSize) {
         if (win_error != nullptr) *win_error = ERROR_INVALID_DATA;
         return false;
     }
 
+    // 把字节缓冲区按结构体来解读，先记下标签。
     const ReparseDataBuffer* data = reinterpret_cast<const ReparseDataBuffer*>(buffer.data());
     out->tag = data->ReparseTag;
     out->is_relative = false;
 
     switch (data->ReparseTag) {
+        // 符号链接：取目标、是否相对、指向文件还是目录。
         case IO_REPARSE_TAG_SYMLINK: {
             const auto& link = data->SymbolicLink;
             out->is_relative = (link.Flags & kSymlinkFlagRelative) != 0;
@@ -127,6 +136,7 @@ bool ReadReparsePoint(const std::wstring& path, ReparseInfo* out, uint32_t* win_
             out->type = is_directory ? FileType::kSymlinkDir : FileType::kSymlinkFile;
             return true;
         }
+        // junction：取目标即可，junction 总是指向目录、总是绝对路径。
         case IO_REPARSE_TAG_MOUNT_POINT: {
             const auto& mount = data->MountPoint;
             out->target = Slice(mount.PathBuffer, mount.PrintNameOffset, mount.PrintNameLength);
@@ -145,6 +155,7 @@ bool ReadReparsePoint(const std::wstring& path, ReparseInfo* out, uint32_t* win_
     }
 }
 
+/// 建符号链接：先带"免管理员"标志试，失败再不带标志重试一次。
 bool CreateSymlink(const std::wstring& link_path, const std::wstring& target, bool directory,
                    uint32_t* win_error) {
     const std::wstring extended_link = platform::ToExtendedPath(link_path);
@@ -165,6 +176,8 @@ bool CreateSymlink(const std::wstring& link_path, const std::wstring& target, bo
     return false;
 }
 
+/// 建 junction：先建一个空目录，再手工拼 REPARSE_DATA_BUFFER，
+/// 用 FSCTL_SET_REPARSE_POINT 把它"变成" junction。不需要管理员权限。
 bool CreateJunction(const std::wstring& link_path, const std::wstring& target,
                     uint32_t* win_error) {
     // junction 只能指向本地绝对路径，所以这里必须规范化成绝对的。
@@ -173,6 +186,7 @@ bool CreateJunction(const std::wstring& link_path, const std::wstring& target,
     const std::wstring substitute = std::wstring(kNtPrefix) + absolute_target;
     const std::wstring& print = absolute_target;
 
+    // 第一步：建空目录（已存在也行）。junction 本质上就是一个带重解析数据的目录。
     const std::wstring extended_link = platform::ToExtendedPath(link_path);
     if (CreateDirectoryW(extended_link.c_str(), nullptr) == 0 &&
         GetLastError() != ERROR_ALREADY_EXISTS) {
@@ -182,6 +196,7 @@ bool CreateJunction(const std::wstring& link_path, const std::wstring& target,
 
     // 两个字符串连着放，各自带一个结尾 NUL。这是 mklink /J 生成的布局，
     // 照着来兼容性最好。
+    // 第二步：算总长度。头 8 字节 + 4 个 USHORT 字段 + 两个字符串（各带 NUL）。
     const size_t substitute_bytes = substitute.size() * sizeof(WCHAR);
     const size_t print_bytes = print.size() * sizeof(WCHAR);
     const size_t path_bytes = substitute_bytes + sizeof(WCHAR) + print_bytes + sizeof(WCHAR);
@@ -192,6 +207,7 @@ bool CreateJunction(const std::wstring& link_path, const std::wstring& target,
         return false;
     }
 
+    // 第三步：填缓冲区。SubstituteName 放在最前（偏移 0），PrintName 紧跟其后。
     std::vector<uint8_t> buffer(total, 0);
     ReparseDataBuffer* data = reinterpret_cast<ReparseDataBuffer*>(buffer.data());
     data->ReparseTag = IO_REPARSE_TAG_MOUNT_POINT;
@@ -206,6 +222,7 @@ bool CreateJunction(const std::wstring& link_path, const std::wstring& target,
         reinterpret_cast<uint8_t*>(data->MountPoint.PathBuffer) + substitute_bytes + sizeof(WCHAR),
         print.c_str(), print_bytes + sizeof(WCHAR));
 
+    // 第四步：打开目录、写入重解析数据。
     // 写重解析点要能写这个目录。仍然要带 FILE_FLAG_OPEN_REPARSE_POINT，
     // 否则打开的是它指向的地方（虽然此刻还没指向任何地方）。
     platform::ScopedHandle handle =
