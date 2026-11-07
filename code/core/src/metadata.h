@@ -92,6 +92,10 @@ bool ApplyTimestamps(const std::wstring& path, const EntryMeta& meta, bool no_fo
 
 /// 设置属性位（自动屏蔽掉不可设置的那些）。
 ///
+/// 目标上的可设置位会被**整体替换**成源端的：源端没有的位（包括新建文件时
+/// 系统自动加上的 ARCHIVE）会被清掉。meta.attributes 整个为 0 表示没记录，
+/// 此时什么都不做。
+///
 /// **这一步必须放在最后。** 先设了 FILE_ATTRIBUTE_READONLY 的话，
 /// 后续再去设时间戳和 ACL 都会失败——而且失败得很安静，只是元数据没生效。
 ///

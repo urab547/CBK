@@ -240,7 +240,8 @@ bool StreamFileContent(HANDLE handle, IPacker* packer, ISink& out, IProgressObse
 /// SeRestorePrivilege、目标卷不支持 ACL），属于可预期的失败。为了一个时间戳
 /// 设不上就让整个还原失败，等于把"还原出 99% 的正确数据"变成"什么都没有"。
 ///
-/// 文件在 Pass 2 写完内容后调用，目录在 Pass 3 逆序调用。
+/// 文件在 Pass 2 写完内容后调用，符号链接和 junction 在 Pass 2 建好链接后调用
+/// （设的是链接本身，不碰目标），目录在 Pass 3 逆序调用。
 void ApplyEntryMetadata(const std::wstring& absolute, const EntryMeta& entry,
                         IProgressObserver* observer) {
     uint32_t error = 0;
@@ -251,8 +252,16 @@ void ApplyEntryMetadata(const std::wstring& absolute, const EntryMeta& entry,
     }
 
     // ② 属主、属组、DACL（备份时存成了一串 SDDL 文本）。
+    //
+    // 符号链接和 junction 跳过这一步：GetNamedSecurityInfoW / SetNamedSecurityInfoW
+    // 都会顺着链接走到目标上，备份时存下的本来就是目标的权限；还原时再写一遍，
+    // 改的也是目标——链接指向源目录之外时，等于去改一个不归我们管的文件的权限。
+    const bool is_link = entry.type == FileType::kSymlinkFile ||
+                         entry.type == FileType::kSymlinkDir || entry.type == FileType::kJunction;
     bool owner_skipped = false;
-    if (!ApplySecurityDescriptor(absolute, entry.sddl, &owner_skipped, &error)) {
+    if (is_link) {
+        // 什么都不做，直接进入 ③。
+    } else if (!ApplySecurityDescriptor(absolute, entry.sddl, &owner_skipped, &error)) {
         Warn(observer, entry.relative_path, L"权限设置失败：" + platform::FormatWinError(error),
              error);
     } else if (owner_skipped) {
@@ -518,6 +527,8 @@ private:
         const bool directory = current_.type == FileType::kSymlinkDir;
         uint32_t error = 0;
         if (CreateSymlink(target_path_, current_.link_target, directory, &error)) {
+            // 链接自身的时间戳和属性位。降级出来的占位不设——那不是原来的东西。
+            if (options_.restore_metadata) ApplyEntryMetadata(target_path_, current_, observer_);
             ++result_->entries_done;
             return;
         }
@@ -554,6 +565,9 @@ private:
         // junction 不需要管理员权限也不需要开发者模式，这条路径基本不会失败。
         uint32_t error = 0;
         if (CreateJunction(target_path_, current_.link_target, &error)) {
+            // junction 自身的时间戳和属性位。之后不会再往它里面写东西，
+            // 所以这里设完就不会被刷新，不用像普通目录那样拖到 Pass 3。
+            if (options_.restore_metadata) ApplyEntryMetadata(target_path_, current_, observer_);
             ++result_->entries_done;
             return;
         }
