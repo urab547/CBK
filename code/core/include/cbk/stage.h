@@ -62,7 +62,9 @@ class IStageFactory {
 public:
     virtual ~IStageFactory() = default;
 
+    /// 算法名，与它造出来的 IStage::Name() 一致。
     virtual std::string Name() const = 0;
+    /// 属于压缩还是加密，流水线顺序校验靠它。
     virtual StageKind Kind() const = 0;
 
     virtual std::unique_ptr<IStage> CreateForward() = 0;  ///< 压缩 / 加密
@@ -72,9 +74,12 @@ public:
 /// Stage 注册表。`cbk info` 会按 Kind 分组列出，供 GUI 填两个下拉框。
 class StageRegistry {
 public:
+    /// 全局唯一实例（单例）。
     static StageRegistry& Instance();
 
+    /// 登记一个工厂，名字取自 factory->Name()。
     void Register(std::unique_ptr<IStageFactory> factory);
+    /// 这个名字是否已登记。
     bool Has(const std::string& name) const;
     /// 名字不存在时返回 nullptr。
     IStageFactory* Find(const std::string& name) const;
@@ -82,8 +87,9 @@ public:
     std::vector<std::string> Names(StageKind kind) const;
 
 private:
+    /// 构造函数私有：只能通过 Instance() 拿到唯一实例。
     StageRegistry() = default;
-    std::map<std::string, std::unique_ptr<IStageFactory>> factories_;
+    std::map<std::string, std::unique_ptr<IStageFactory>> factories_;  ///< 名字 → 工厂
 };
 
 /// 校验流水线顺序。

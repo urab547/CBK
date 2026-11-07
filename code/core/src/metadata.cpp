@@ -13,10 +13,12 @@ namespace cbk {
 
 namespace {
 
+/// FILETIME（两个 32 位半截）→ 一个 64 位整数。单位仍是 100 纳秒，不丢精度。
 uint64_t FromFileTime(const FILETIME& time) {
     return (static_cast<uint64_t>(time.dwHighDateTime) << 32) | time.dwLowDateTime;
 }
 
+/// 上面的逆操作：64 位整数 → FILETIME，交给 SetFileTime 用。
 FILETIME ToFileTime(uint64_t value) {
     FILETIME time;
     time.dwLowDateTime = static_cast<DWORD>(value & 0xFFFFFFFFull);
@@ -24,12 +26,15 @@ FILETIME ToFileTime(uint64_t value) {
     return time;
 }
 
+/// 把刚才失败的 Win32 错误码交给调用方（可为 nullptr）。
 void Record(uint32_t* win_error) {
     if (win_error != nullptr) *win_error = GetLastError();
 }
 
 }  // namespace
 
+/// 从一个已打开的句柄读属性位和三个时间戳。
+/// 备份引擎读文件内容时已经开着句柄，顺手用这个，不必再开一次。
 bool ReadMetadataFromHandle(HANDLE handle, EntryMeta* meta) {
     BY_HANDLE_FILE_INFORMATION info = {};
     if (GetFileInformationByHandle(handle, &info) == 0) return false;
@@ -41,6 +46,7 @@ bool ReadMetadataFromHandle(HANDLE handle, EntryMeta* meta) {
     return true;
 }
 
+/// 按路径读属性位和时间戳：自己开一个只读属性的句柄，再转给上面那个函数。
 bool ReadMetadataByPath(const std::wstring& path, bool no_follow_reparse, EntryMeta* meta) {
     // 只要读元数据，不要 GENERIC_READ——那会在没有读权限的对象上失败。
     // FILE_READ_ATTRIBUTES 配合 FILE_FLAG_BACKUP_SEMANTICS 连目录都能开。
@@ -50,11 +56,12 @@ bool ReadMetadataByPath(const std::wstring& path, bool no_follow_reparse, EntryM
     return ReadMetadataFromHandle(handle.Get(), meta);
 }
 
-// 只要 FILE_WRITE_ATTRIBUTES 权限，不要 GENERIC_WRITE。
-//
-// 权限要得越少，能成功的对象越多——比如一个我们只有"写属性"权限、
-// 没有写数据权限的文件，要 GENERIC_WRITE 会直接失败，而它的时间戳
-// 本来是设得上的。
+/// 还原三个时间戳。
+///
+/// 只要 FILE_WRITE_ATTRIBUTES 权限，不要 GENERIC_WRITE。
+/// 权限要得越少，能成功的对象越多——比如一个我们只有"写属性"权限、
+/// 没有写数据权限的文件，要 GENERIC_WRITE 会直接失败，而它的时间戳
+/// 本来是设得上的。
 bool ApplyTimestamps(const std::wstring& path, const EntryMeta& meta, bool no_follow_reparse,
                      uint32_t* win_error) {
     platform::ScopedHandle handle = platform::OpenForAttributeWrite(path, no_follow_reparse);
@@ -79,6 +86,9 @@ bool ApplyTimestamps(const std::wstring& path, const EntryMeta& meta, bool no_fo
     return true;
 }
 
+/// 还原属性位（只读、隐藏、系统……）。
+/// 先和 kSettableAttributes 相与，把目录、重解析点、压缩这类由文件系统维护、
+/// 不能手动设置的位滤掉，否则 SetFileAttributesW 会报参数错误。
 bool ApplyAttributes(const std::wstring& path, const EntryMeta& meta, uint32_t* win_error) {
     const DWORD attributes = static_cast<DWORD>(meta.attributes & kSettableAttributes);
 
@@ -102,14 +112,17 @@ namespace {
 template <typename T>
 class LocalPtr {
 public:
+    /// 离开作用域时自动 LocalFree。
     ~LocalPtr() {
         if (value_ != nullptr) LocalFree(value_);
     }
+    /// 交给 Win32 API 的"输出参数"：API 把分配好的指针写进来。
     T* Receive() { return &value_; }
+    /// 取出指针使用，所有权仍归本对象。
     T Get() const { return value_; }
 
 private:
-    T value_ = nullptr;
+    T value_ = nullptr;  ///< 被管理的指针
 };
 
 /// 两个 SID 是否指同一个账户。任何一边为空或无效都算"不同"——
@@ -126,6 +139,9 @@ constexpr SECURITY_INFORMATION kSections =
 
 }  // namespace
 
+/// 读安全描述符并转成 SDDL 文本。两步：
+/// ① GetNamedSecurityInfoW 取二进制描述符（属主 + 属组 + DACL）；
+/// ② ConvertSecurityDescriptorToStringSecurityDescriptorW 转成文本，再转 UTF-8 存起来。
 bool ReadSecurityDescriptor(const std::wstring& path, std::string* sddl, uint32_t* win_error) {
     const std::wstring extended = platform::ToExtendedPath(path);
 
@@ -139,6 +155,7 @@ bool ReadSecurityDescriptor(const std::wstring& path, std::string* sddl, uint32_
         return false;
     }
 
+    // 二进制 → SDDL 文本（形如 "O:S-1-5-...G:...D:P(A;;FA;;;SY)..."）。
     LocalPtr<LPWSTR> text;
     if (ConvertSecurityDescriptorToStringSecurityDescriptorW(
             descriptor.Get(), SDDL_REVISION_1, kSections, text.Receive(), nullptr) == 0) {
@@ -149,11 +166,16 @@ bool ReadSecurityDescriptor(const std::wstring& path, std::string* sddl, uint32_
     return true;
 }
 
+/// 把 SDDL 文本还原到文件上。步骤：
+/// ① SDDL 文本 → 二进制描述符；② 拆出属主、属组、DACL 三段；
+/// ③ 跟文件现状比，已经一样的段不设；④ 决定继承开关；
+/// ⑤ 调 SetNamedSecurityInfoW；设属主失败时退一步只设 DACL。
 bool ApplySecurityDescriptor(const std::wstring& path, const std::string& sddl, bool* owner_skipped,
                              uint32_t* win_error) {
     if (owner_skipped != nullptr) *owner_skipped = false;
     if (sddl.empty()) return true;  // 备份时就没读到，没什么可还原的
 
+    // ① SDDL 文本 → 二进制描述符。文本坏了就直接失败。
     LocalPtr<PSECURITY_DESCRIPTOR> descriptor;
     if (ConvertStringSecurityDescriptorToSecurityDescriptorW(
             FromUtf8(sddl).c_str(), SDDL_REVISION_1, descriptor.Receive(), nullptr) == 0) {
@@ -161,7 +183,7 @@ bool ApplySecurityDescriptor(const std::wstring& path, const std::string& sddl, 
         return false;
     }
 
-    // SetNamedSecurityInfoW 要的是拆开的各段指针，不是整块描述符。
+    // ② SetNamedSecurityInfoW 要的是拆开的各段指针，不是整块描述符。
     PSID owner = nullptr;
     PSID group = nullptr;
     PACL dacl = nullptr;
@@ -173,7 +195,7 @@ bool ApplySecurityDescriptor(const std::wstring& path, const std::string& sddl, 
 
     const std::wstring extended = platform::ToExtendedPath(path);
 
-    // 属主、属组已经是对的就别去设。
+    // ③ 属主、属组已经是对的就别去设。
     //
     // 设属主要的是目标上的 WRITE_OWNER 访问权（或 SeRestorePrivilege），
     // 跟"要设成谁"无关。非提权用户在 D 盘这类位置通常只有"修改"权限，
@@ -204,7 +226,7 @@ bool ApplySecurityDescriptor(const std::wstring& path, const std::string& sddl, 
     if (dacl_present) sections |= DACL_SECURITY_INFORMATION;
     if (sections == 0) return true;  // 三段都没有，没什么可设的
 
-    // 继承开关必须显式给：SetNamedSecurityInfoW 不看 SDDL 里的 `P`。
+    // ④ 继承开关必须显式给：SetNamedSecurityInfoW 不看 SDDL 里的 `P`。
     // 不传的话，还原出来的目录会去继承目标位置的权限，跟源端对不上。
     SECURITY_INFORMATION inheritance = 0;
     if (dacl_present) {
@@ -217,6 +239,7 @@ bool ApplySecurityDescriptor(const std::wstring& path, const std::string& sddl, 
                                      : UNPROTECTED_DACL_SECURITY_INFORMATION;
     }
 
+    // ⑤ 第一次尝试：所有需要的段一起设。
     DWORD status = SetNamedSecurityInfoW(const_cast<LPWSTR>(extended.c_str()), SE_FILE_OBJECT,
                                          sections | inheritance, owner, group, dacl, nullptr);
     if (status == ERROR_SUCCESS) return true;

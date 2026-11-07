@@ -30,10 +30,10 @@ namespace cbk {
 
 /// 从重解析点读出来的信息。
 struct ReparseInfo {
-    uint32_t tag = 0;  ///< IO_REPARSE_TAG_SYMLINK / _MOUNT_POINT / 其它
-    FileType type = FileType::kUnsupported;
-    std::wstring target;       ///< 原始目标字符串，可能是相对路径
-    bool is_relative = false;  ///< 仅符号链接有意义
+    uint32_t tag = 0;                        ///< IO_REPARSE_TAG_SYMLINK / _MOUNT_POINT / 其它
+    FileType type = FileType::kUnsupported;  ///< 解析出来的类型：文件/目录符号链接、junction
+    std::wstring target;                     ///< 原始目标字符串，可能是相对路径
+    bool is_relative = false;                ///< 仅符号链接有意义
 };
 
 /// 读一个重解析点。

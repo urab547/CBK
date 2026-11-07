@@ -12,7 +12,7 @@ namespace {
 /// \\?\ 与 \\.\ 前缀都是 4 个字符。
 constexpr size_t kPrefixLen = 4;
 
-/// 判断是不是 "C:\" 这种盘符根，或者 UNC 的 "\\" 开头。
+/// 是不是 UNC 网络路径（以两个反斜杠开头，如 \\server\share）。
 bool IsUncPath(const std::wstring& path) {
     return path.size() >= 2 && path[0] == L'\\' && path[1] == L'\\';
 }
@@ -21,17 +21,20 @@ bool IsUncPath(const std::wstring& path) {
 
 // -------------------------------------------------------------------- 路径
 
+/// 是否已经带了扩展前缀（\\?\ 或 \\.\）。判断依据：前 4 个字符的形状。
 bool IsExtendedPath(const std::wstring& path) {
     if (path.size() < kPrefixLen) return false;
     if (path[0] != L'\\' || path[1] != L'\\' || path[3] != L'\\') return false;
     return path[2] == L'?' || path[2] == L'.';
 }
 
+/// 规范化：斜杠统一成反斜杠 → GetFullPathNameW 转绝对路径 → 去掉结尾多余的反斜杠。
 std::wstring NormalizePath(const std::wstring& path) {
     if (path.empty()) return std::wstring();
     // \\?\ 路径的语义就是"原样送给文件系统"，动它反而会出错。
     if (IsExtendedPath(path)) return path;
 
+    // 正斜杠一律换成反斜杠：Windows API 大多两种都认，但 \\?\ 路径只认反斜杠。
     std::wstring slashed = path;
     for (wchar_t& c : slashed) {
         if (c == L'/') c = L'\\';
@@ -42,6 +45,7 @@ std::wstring NormalizePath(const std::wstring& path) {
     const DWORD needed = GetFullPathNameW(slashed.c_str(), 0, nullptr, nullptr);
     if (needed == 0) return slashed;  // 拿不到就退回原值，交给上层去失败并报错
 
+    // 第一次调用只问需要多大缓冲区，第二次才真正取结果——Win32 的常见用法。
     std::vector<wchar_t> buffer(needed);
     const DWORD written = GetFullPathNameW(slashed.c_str(), needed, buffer.data(), nullptr);
     if (written == 0 || written >= needed) return slashed;
@@ -55,6 +59,7 @@ std::wstring NormalizePath(const std::wstring& path) {
     return full;
 }
 
+/// 先规范化，再加 \\?\ 前缀（UNC 路径加 \\?\UNC），绕过 260 字符限制。
 std::wstring ToExtendedPath(const std::wstring& path) {
     if (path.empty()) return std::wstring();
     if (IsExtendedPath(path)) return path;  // 幂等
@@ -68,6 +73,7 @@ std::wstring ToExtendedPath(const std::wstring& path) {
     return std::wstring(L"\\\\?\\") + full;
 }
 
+/// 拼路径：保证中间恰好一个反斜杠（base 结尾补一个，child 开头多余的去掉）。
 std::wstring JoinPath(const std::wstring& base, const std::wstring& child) {
     if (base.empty()) return child;
     if (child.empty()) return base;
@@ -82,6 +88,7 @@ std::wstring JoinPath(const std::wstring& base, const std::wstring& child) {
 
 // -------------------------------------------------------------------- 句柄
 
+/// 移动赋值：先关掉自己手上的句柄，再接管对方的，对方置为无效。
 ScopedHandle& ScopedHandle::operator=(ScopedHandle&& other) noexcept {
     if (this != &other) {
         Reset(other.handle_);
@@ -90,17 +97,20 @@ ScopedHandle& ScopedHandle::operator=(ScopedHandle&& other) noexcept {
     return *this;
 }
 
+/// 交出句柄的所有权：返回句柄，自己不再负责关闭它。
 HANDLE ScopedHandle::Release() {
     HANDLE released = handle_;
     handle_ = INVALID_HANDLE_VALUE;
     return released;
 }
 
+/// 关掉旧句柄（如果有效），换成新句柄。不传参数就是"只关闭"。
 void ScopedHandle::Reset(HANDLE handle) {
     if (IsValid()) CloseHandle(handle_);
     handle_ = handle;
 }
 
+/// 所有打开文件/目录的操作最终都走这里，统一带上备份语义和全共享位。
 ScopedHandle OpenPath(const std::wstring& path, DWORD access, DWORD disposition,
                       bool no_follow_reparse) {
     // FILE_FLAG_BACKUP_SEMANTICS 必须有：既允许打开目录句柄，也配合
@@ -117,30 +127,38 @@ ScopedHandle OpenPath(const std::wstring& path, DWORD access, DWORD disposition,
     return ScopedHandle(handle);
 }
 
+/// 以只读方式打开已存在的文件（备份时读内容用）。
 ScopedHandle OpenForRead(const std::wstring& path, bool no_follow_reparse) {
     return OpenPath(path, GENERIC_READ, OPEN_EXISTING, no_follow_reparse);
 }
 
+/// 只要"写属性"权限地打开（还原时间戳用），权限要得少，成功率高。
 ScopedHandle OpenForAttributeWrite(const std::wstring& path, bool no_follow_reparse) {
     return OpenPath(path, FILE_WRITE_ATTRIBUTES, OPEN_EXISTING, no_follow_reparse);
 }
 
+/// 新建（已存在则清空）一个文件用于写入（还原文件内容用）。
 ScopedHandle CreateForWrite(const std::wstring& path) {
     return OpenPath(path, GENERIC_WRITE, CREATE_ALWAYS, true);
 }
 
 // -------------------------------------------------------------------- 特权
 
+/// 在本进程的访问令牌上启用一项特权。三步：
+/// ① 打开进程令牌；② 把特权名查成 LUID（系统内部编号）；③ AdjustTokenPrivileges 启用。
 bool EnablePrivilege(const wchar_t* privilege_name) {
+    // ① 打开令牌，要"调整特权"和"查询"两种权限。
     HANDLE raw_token = nullptr;
     if (!OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &raw_token)) {
         return false;
     }
     ScopedHandle token(raw_token);
 
+    // ② 特权名（如 "SeBackupPrivilege"）→ LUID。
     LUID luid = {};
     if (!LookupPrivilegeValueW(nullptr, privilege_name, &luid)) return false;
 
+    // ③ 构造"启用这一项"的请求。
     TOKEN_PRIVILEGES privileges = {};
     privileges.PrivilegeCount = 1;
     privileges.Privileges[0].Luid = luid;
@@ -157,6 +175,7 @@ bool EnablePrivilege(const wchar_t* privilege_name) {
     return GetLastError() != ERROR_NOT_ALL_ASSIGNED;
 }
 
+/// 依次尝试启用备份、还原、安全三项特权，各自成败分别记录。拿不到不算错误。
 PrivilegeState EnableBackupPrivileges() {
     PrivilegeState state;
     state.backup = EnablePrivilege(SE_BACKUP_NAME);
@@ -167,6 +186,7 @@ PrivilegeState EnableBackupPrivileges() {
 
 // -------------------------------------------------------------------- 错误
 
+/// 把 Win32 错误码翻成系统自带的文字描述（跟系统语言一致），查不到就输出编号。
 std::wstring FormatWinError(uint32_t error_code) {
     LPWSTR buffer = nullptr;
     const DWORD length = FormatMessageW(

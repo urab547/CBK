@@ -22,12 +22,12 @@
 #include "src/stages/xor_cbc_stage.h"
 #include "src/stages/xor_stage.h"
 
-
 // 新增 Stage 时在这里加 include：
 // #include "stages/aes_stage.h"        // 队友 B
 
 namespace cbk {
 
+/// 登记全部内置打包器：cbk-native（自有格式）、tar、cpio。
 void RegisterBuiltinPackers() {
     PackerRegistry& registry = PackerRegistry::Instance();
 
@@ -36,6 +36,7 @@ void RegisterBuiltinPackers() {
     registry.Register("cpio", [] { return std::make_unique<CpioPacker>(); });
 }
 
+/// 登记全部内置变换阶段：压缩 huffman / lz77，加密 xor / vigenere / xor-cbc。
 void RegisterBuiltinStages() {
     StageRegistry& registry = StageRegistry::Instance();
     registry.Register(std::make_unique<HuffmanStageFactory>());

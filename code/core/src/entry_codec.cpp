@@ -23,8 +23,9 @@ bool ToFileType(uint8_t raw, FileType* out) {
 
 }  // namespace
 
+/// 编码一条记录：① 在内存里拼记录体；② 前面加 4 字节长度；③ 一次性写出。
 void WriteEntryMeta(const EntryMeta& meta, ISink& out) {
-    // 先在内存里拼完整条记录，再一次性写出去。
+    // ① 先在内存里拼完整条记录，再一次性写出去。
     //
     // 不能边算边写：长度前缀在最前面，而长度只有拼完才知道。ISink 是
     // 只进不退的流（下游可能已经是压缩器了），没法回头改前面的字节。
@@ -51,10 +52,12 @@ void WriteEntryMeta(const EntryMeta& meta, ISink& out) {
     body.WriteU32(meta.reparse_tag);
     body.WriteU64(meta.hardlink_ref_id);
 
+    // 三个变长字段：相对路径、链接目标（UTF-16 → UTF-8）、SDDL（本来就是 UTF-8）。
     body.WriteLengthPrefixed(ToUtf8(meta.relative_path));
     body.WriteLengthPrefixed(ToUtf8(meta.link_target));
     body.WriteLengthPrefixed(meta.sddl);
 
+    // ② 加长度前缀，组成"一帧"。③ 整帧一次写给下游。
     std::vector<uint8_t> framed;
     framed.reserve(record.size() + 4);
     ByteWriter frame(&framed);
@@ -64,11 +67,12 @@ void WriteEntryMeta(const EntryMeta& meta, ISink& out) {
     out.Write(framed.data(), framed.size());
 }
 
-// 解析到临时对象里，全部成功了才写回 out。
-//
-// 直接往 *out 里逐字段填的话，解析失败时调用方拿到的是一个填了一半的
-// 结构体——而返回值是 false，很容易被忽略，然后半个条目就流进了后面
-// 的还原逻辑。宁可多一次拷贝。
+/// 解码记录体：字段顺序必须和 WriteEntryMeta 一模一样。
+///
+/// 解析到临时对象里，全部成功了才写回 out。
+/// 直接往 *out 里逐字段填的话，解析失败时调用方拿到的是一个填了一半的
+/// 结构体——而返回值是 false，很容易被忽略，然后半个条目就流进了后面
+/// 的还原逻辑。宁可多一次拷贝。
 bool DecodeEntryMeta(ByteReader* reader, EntryMeta* out) {
     EntryMeta meta;
 
@@ -86,6 +90,7 @@ bool DecodeEntryMeta(ByteReader* reader, EntryMeta* out) {
     meta.reparse_tag = reader->ReadU32();
     meta.hardlink_ref_id = reader->ReadU64();
 
+    // 三个变长字段，读失败（长度越界）立即返回。
     std::string relative_path;
     std::string link_target;
     std::string sddl;
@@ -97,6 +102,7 @@ bool DecodeEntryMeta(ByteReader* reader, EntryMeta* out) {
     if (!reader->IsOk()) return false;
     if (!ToFileType(raw_type, &meta.type)) return false;
 
+    // 全部校验通过，再把 UTF-8 转回内存里用的 UTF-16。
     meta.relative_path = FromUtf8(relative_path);
     meta.link_target = FromUtf8(link_target);
     meta.sddl = sddl;
@@ -105,6 +111,7 @@ bool DecodeEntryMeta(ByteReader* reader, EntryMeta* out) {
     return true;
 }
 
+/// 从流里读一帧：先读 4 字节长度 → 校验长度合理 → 读满记录体 → 交给 DecodeEntryMeta。
 bool ReadEntryMeta(ISource& source, EntryMeta* out, bool* end_of_stream) {
     *end_of_stream = false;
 
@@ -115,10 +122,12 @@ bool ReadEntryMeta(ISource& source, EntryMeta* out, bool* end_of_stream) {
         *end_of_stream = true;
         return false;
     }
+    // 读到了第 1 个字节，剩下 3 个就必须读满，否则是被截断了。
     if (!ReadExact(source, length_bytes + 1, 3)) return false;
 
     ByteReader length_reader(length_bytes, sizeof(length_bytes));
     const uint32_t record_size = length_reader.ReadU32();
+    // 长度为 0 或大得离谱都说明数据坏了，拒绝，免得去申请几 GB 内存。
     if (record_size == 0 || record_size > kMaxEntryRecordSize) return false;
 
     std::vector<uint8_t> record(record_size);

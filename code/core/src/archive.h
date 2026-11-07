@@ -48,8 +48,10 @@ struct PipelineDesc {
     std::string packer;               ///< 打包器名，如 "cbk-native"
     std::vector<std::string> stages;  ///< 字节变换链，按应用顺序
 
+    /// 转成 "packer=...;stages=a,b" 文本。
     std::string Serialize() const;
 
+    /// 从文本解析回结构体。
     /// @return 语法不合法、或含有不该出现的字符时返回 false。
     static bool Parse(const std::string& text, PipelineDesc* out);
 };
@@ -60,18 +62,18 @@ struct PipelineDesc {
 
 /// FileHeader 里的字段，加上紧随其后的两段变长明文。
 struct ArchiveHeader {
-    uint16_t format_version = kFormatVersion;
-    uint16_t flags = 0;       ///< bit0 已打包 / bit1 已压缩 / bit2 已加密
-    uint64_t created_at = 0;  ///< FILETIME
-    uint64_t entry_count = 0;
-    uint64_t data_offset = 0;
-    uint64_t data_size = 0;
-    uint64_t index_offset = 0;
-    uint64_t index_size = 0;
-    uint64_t total_original_bytes = 0;
+    uint16_t format_version = kFormatVersion;  ///< 格式版本号
+    uint16_t flags = 0;                        ///< bit0 已打包 / bit1 已压缩 / bit2 已加密
+    uint64_t created_at = 0;                   ///< FILETIME
+    uint64_t entry_count = 0;                  ///< 条目总数
+    uint64_t data_offset = 0;                  ///< 数据区从文件第几字节开始
+    uint64_t data_size = 0;                    ///< 数据区字节数
+    uint64_t index_offset = 0;                 ///< 索引区从文件第几字节开始
+    uint64_t index_size = 0;                   ///< 索引区字节数
+    uint64_t total_original_bytes = 0;         ///< 所有文件原始大小之和
 
     std::wstring source_root;  ///< 规范化的绝对路径，不带 \\?\ 前缀
-    PipelineDesc pipeline;
+    PipelineDesc pipeline;     ///< 用了哪些算法
 };
 
 /// flags 的三个位。
@@ -115,6 +117,7 @@ public:
     ArchiveWriter();
     ~ArchiveWriter();
 
+    /// 禁止拷贝：一个对象独占一个打开的文件。
     ArchiveWriter(const ArchiveWriter&) = delete;
     ArchiveWriter& operator=(const ArchiveWriter&) = delete;
 
@@ -141,26 +144,29 @@ public:
     uint64_t DataBytesWritten() const { return data_bytes_; }
 
 private:
+    /// 写某个区域时顺带统计字节数和 CRC 的 ISink，定义在 .cpp 里。
     class RegionSink;
 
+    /// 写入进度：未打开 → 写数据区 → 写索引区 → 已完成。用来拦截调用顺序错误。
     enum class Phase { kClosed, kData, kIndex, kDone };
 
+    /// 出错时统一处理：拼错误信息、删半成品，返回 kFailed。
     Status Fail(const std::wstring& what, std::wstring* error);
 
-    platform::ScopedHandle file_;
-    std::wstring path_;
-    std::wstring destination_;
-    Phase phase_ = Phase::kClosed;
+    platform::ScopedHandle file_;   ///< 正在写的文件句柄
+    std::wstring path_;             ///< 实际写入的临时文件路径（.partial-<pid>）
+    std::wstring destination_;      ///< 最终的 .cbk 路径，Close 成功后改名过去
+    Phase phase_ = Phase::kClosed;  ///< 当前进度
 
-    ArchiveHeader header_;
-    std::string pipeline_text_;
-    std::string source_root_utf8_;
+    ArchiveHeader header_;          ///< 头部字段，Close 时回填
+    std::string pipeline_text_;     ///< PipelineDesc 的文本形式
+    std::string source_root_utf8_;  ///< 源根的 UTF-8 形式
 
-    std::unique_ptr<RegionSink> sink_;
-    uint64_t data_bytes_ = 0;
-    uint32_t data_crc_ = 0;
-    uint64_t index_bytes_ = 0;
-    uint32_t index_crc_ = 0;
+    std::unique_ptr<RegionSink> sink_;  ///< 当前区域的写入端
+    uint64_t data_bytes_ = 0;           ///< 数据区字节数
+    uint32_t data_crc_ = 0;             ///< 数据区 CRC32
+    uint64_t index_bytes_ = 0;          ///< 索引区字节数
+    uint32_t index_crc_ = 0;            ///< 索引区 CRC32
 };
 
 // ============================================================================
@@ -173,6 +179,7 @@ public:
     /// 读头部、PipelineDesc、源根、尾部，并做一致性校验。
     Status Open(const std::wstring& path, std::wstring* error);
 
+    /// 解析出来的头部信息。
     const ArchiveHeader& Header() const { return header_; }
 
     /// 尾部里记的三个校验和。
@@ -189,11 +196,11 @@ public:
     Status Verify(std::wstring* error) const;
 
 private:
-    std::wstring path_;
-    ArchiveHeader header_;
-    uint32_t header_crc_ = 0;
-    uint32_t data_crc_ = 0;
-    uint32_t index_crc_ = 0;
+    std::wstring path_;        ///< .cbk 文件路径
+    ArchiveHeader header_;     ///< 解析出来的头部
+    uint32_t header_crc_ = 0;  ///< 尾部记录的头部 CRC
+    uint32_t data_crc_ = 0;    ///< 尾部记录的数据区 CRC
+    uint32_t index_crc_ = 0;   ///< 尾部记录的索引区 CRC
 };
 
 }  // namespace cbk

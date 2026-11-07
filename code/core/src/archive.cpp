@@ -17,23 +17,26 @@ namespace cbk {
 
 namespace {
 
-// ---- FileHeader 各字段的偏移，跟 docs/实现方案.md 3.2 节一一对应 ----
-constexpr size_t kOffMagic = 0;
-constexpr size_t kOffFormatVersion = 4;
-constexpr size_t kOffFlags = 6;
-constexpr size_t kOffHeaderSize = 8;
-constexpr size_t kOffPipelineLen = 12;
-constexpr size_t kOffCreatedAt = 16;
-constexpr size_t kOffEntryCount = 24;
-constexpr size_t kOffDataOffset = 32;
-constexpr size_t kOffDataSize = 40;
-constexpr size_t kOffIndexOffset = 48;
-constexpr size_t kOffIndexSize = 56;
-constexpr size_t kOffTotalOriginal = 64;
-constexpr size_t kOffSourceRootLen = 72;
-constexpr size_t kHeaderReservedLen = 54;
+// ---- 128 字节文件头的字段布局，跟 docs/实现方案.md 3.2 节一一对应 ----
+//
+// 这组 kOff* 偏移量不参与实际读写——读写是按顺序逐字段进行的（见 Close
+// 和 Open），它们留在这里是一张给人看的布局表，方便核对字段顺序有没有写错。
+constexpr size_t kOffMagic = 0;            // 4 字节，魔数 "CBKF"
+constexpr size_t kOffFormatVersion = 4;    // 2 字节，格式版本号
+constexpr size_t kOffFlags = 6;            // 2 字节，已打包 / 已压缩 / 已加密
+constexpr size_t kOffHeaderSize = 8;       // 4 字节，固定为 128
+constexpr size_t kOffPipelineLen = 12;     // 4 字节，流水线描述的长度
+constexpr size_t kOffCreatedAt = 16;       // 8 字节，备份时间（FILETIME）
+constexpr size_t kOffEntryCount = 24;      // 8 字节，条目总数
+constexpr size_t kOffDataOffset = 32;      // 8 字节，数据区起点
+constexpr size_t kOffDataSize = 40;        // 8 字节，数据区长度
+constexpr size_t kOffIndexOffset = 48;     // 8 字节，索引区起点
+constexpr size_t kOffIndexSize = 56;       // 8 字节，索引区长度
+constexpr size_t kOffTotalOriginal = 64;   // 8 字节，原始数据总字节数
+constexpr size_t kOffSourceRootLen = 72;   // 2 字节，源根路径的长度
+constexpr size_t kHeaderReservedLen = 54;  // 剩下 54 字节保留，全填 0
 
-// ---- Footer ----
+// ---- 64 字节尾部：魔数 4 + 索引区偏移 8 + 三个 CRC32 共 12，剩下保留 ----
 constexpr size_t kFooterReservedLen = 40;
 
 // 循环写到写完为止。
@@ -62,6 +65,7 @@ bool SeekTo(HANDLE handle, uint64_t offset) {
     return SetFilePointerEx(handle, position, nullptr, FILE_BEGIN) != 0;
 }
 
+/// 取文件总长度（64 位，能表示超过 4 GB 的文件）。
 bool FileSize(HANDLE handle, uint64_t* out) {
     LARGE_INTEGER size;
     if (!GetFileSizeEx(handle, &size)) return false;
@@ -75,9 +79,12 @@ bool FileSize(HANDLE handle, uint64_t* out) {
 // 索引区和尾部，读过界的话会把索引的字节当成数据吐给打包器。
 class FileRangeSource : public ISource {
 public:
+    /// @param handle 已经定位到区间起点的只读句柄，所有权转交给本对象。
+    /// @param size   这个区间一共有多少字节。
     FileRangeSource(platform::ScopedHandle handle, uint64_t size)
         : handle_(std::move(handle)), remaining_(size) {}
 
+    /// 最多读 len 字节，但绝不越过区间末尾。读完区间或读出错都返回 0。
     size_t Read(uint8_t* buf, size_t len) override {
         if (remaining_ == 0 || len == 0) return 0;
         const DWORD want =
@@ -89,11 +96,14 @@ public:
     }
 
 private:
-    platform::ScopedHandle handle_;
-    uint64_t remaining_;
+    platform::ScopedHandle handle_;  ///< 只读句柄
+    uint64_t remaining_;             ///< 区间里还剩多少字节没读
 };
 
-/// 打开只读句柄并定位到 offset。
+/// 打开容器文件的一个字节区间（数据区或索引区）供流式读取。
+///
+/// 每次调用都开一个新句柄，所以数据区和索引区可以同时打开、互不干扰
+/// （各自有各自的文件读写位置）。打不开或定位失败返回 nullptr。
 std::unique_ptr<ISource> OpenRange(const std::wstring& path, uint64_t offset, uint64_t size) {
     platform::ScopedHandle handle = platform::OpenForRead(path, true);
     if (!handle.IsValid()) return nullptr;
@@ -129,6 +139,7 @@ bool IsValidAlgorithmName(const std::string& name) {
     return true;
 }
 
+/// 当前时间，FILETIME 格式（1601 年起的 100 纳秒数），写进文件头作为备份时间。
 uint64_t NowAsFileTime() {
     FILETIME now = {};
     GetSystemTimeAsFileTime(&now);
@@ -156,6 +167,7 @@ uint16_t ComputeFlags(const PipelineDesc& pipeline) {
 
 // ============================================================ PipelineDesc
 
+/// 拼成 "packer=X;stages=a,b,c" 这一行。没有 Stage 时 stages= 后面是空的。
 std::string PipelineDesc::Serialize() const {
     std::string text = "packer=" + packer + ";stages=";
     for (size_t i = 0; i < stages.size(); ++i) {
@@ -174,6 +186,7 @@ bool PipelineDesc::Parse(const std::string& text, PipelineDesc* out) {
     static const std::string kPackerKey = "packer=";
     static const std::string kStagesKey = ";stages=";
 
+    // 必须以 "packer=" 开头，后面某处紧跟 ";stages="。
     if (text.compare(0, kPackerKey.size(), kPackerKey) != 0) return false;
     const size_t stages_at = text.find(kStagesKey, kPackerKey.size());
     if (stages_at == std::string::npos) return false;
@@ -182,6 +195,7 @@ bool PipelineDesc::Parse(const std::string& text, PipelineDesc* out) {
     parsed.packer = text.substr(kPackerKey.size(), stages_at - kPackerKey.size());
     if (!IsValidAlgorithmName(parsed.packer)) return false;
 
+    // stages= 后面是逗号分隔的算法名，可能为空（不压缩也不加密）。
     const std::string joined = text.substr(stages_at + kStagesKey.size());
     if (!joined.empty()) {
         size_t start = 0;
@@ -202,6 +216,7 @@ bool PipelineDesc::Parse(const std::string& text, PipelineDesc* out) {
 
 // ============================================================ 索引区
 
+/// 把条目表逐条编码写进索引区。每条记录的格式见 entry_codec.h。
 void WriteIndex(const std::vector<EntryMeta>& entries, ISink& out) {
     for (const EntryMeta& entry : entries) {
         WriteEntryMeta(entry, out);
@@ -221,14 +236,20 @@ bool ReadIndex(ISource& source, uint64_t expected_count, std::vector<EntryMeta>*
             if (end_of_stream) break;
             return false;  // 记录损坏
         }
-        // An index is untrusted even when it decrypted successfully. Reject
-        // absolute paths, parent components, drive/stream names and embedded NULs
-        // before restore can create directories or open any output file.
+        // ---- 路径安全检查 ----
+        // 索引即使成功解密，内容也不可信（包可能被人故意构造过）。还原时要把
+        // relative_path 拼到目标目录后面去建文件，所以必须在这里挡住所有能
+        // "逃出"目标目录的写法，否则一个恶意的包就能覆盖系统上任意位置的文件：
+        //   · 空路径、以分隔符开头的路径（绝对路径）
+        //   · 含冒号的路径（盘符如 C:，或 NTFS 备用数据流如 a.txt:stream）
+        //   · 含 NUL 字符的路径（传给 Win32 API 时会在这里被截断成别的路径）
+        //   · 任何一段是 "." 或 ".." 的路径（.. 能一路往上跳出目标目录）
         const auto& path = entry.relative_path;
         if (path.empty() || path.front() == L'\\' || path.front() == L'/' ||
             path.find(L':') != std::wstring::npos || path.find(L'\0') != std::wstring::npos) {
             return false;
         }
+        // 按分隔符逐段检查。
         size_t start = 0;
         while (start < path.size()) {
             const size_t end = path.find_first_of(L"\\/", start);
@@ -238,6 +259,7 @@ bool ReadIndex(ISource& source, uint64_t expected_count, std::vector<EntryMeta>*
             if (end == std::wstring::npos) break;
             start = end + 1;
         }
+        // id 必须严格递增。还原依赖"父目录 id 更小、硬链接指向更小的 id"这条顺序。
         if (!entries.empty() && entry.id <= entries.back().id) return false;
         entries.push_back(std::move(entry));
         // 条数超了就别再读下去，防的是索引区被改坏成一个自增长的怪物。
@@ -254,8 +276,11 @@ bool ReadIndex(ISource& source, uint64_t expected_count, std::vector<EntryMeta>*
 /// EndData() 时把计数快照下来再清零。
 class ArchiveWriter::RegionSink : public ISink {
 public:
+    /// @param handle 容器文件的写入句柄，不归本对象管。
     explicit RegionSink(HANDLE handle) : handle_(handle) {}
 
+    /// 写进文件并累计字节数和 CRC。写失败只记下来，由 Close 统一报错——
+    /// ISink::Write 没有返回值，没法在这里直接告诉调用方。
     void Write(const uint8_t* data, size_t len) override {
         if (len == 0) return;
         if (!WriteAll(handle_, data, len)) {
@@ -266,22 +291,25 @@ public:
         bytes_ += len;
     }
 
+    /// 计数清零。数据区写完、开始写索引区时调用。
     void Restart() {
         crc_.Reset();
         bytes_ = 0;
     }
 
-    bool Failed() const { return failed_; }
-    uint64_t Bytes() const { return bytes_; }
-    uint32_t Crc() const { return crc_.Value(); }
+    bool Failed() const { return failed_; }        ///< 是否发生过写入失败
+    uint64_t Bytes() const { return bytes_; }      ///< 本区已写字节数
+    uint32_t Crc() const { return crc_.Value(); }  ///< 本区内容的 CRC32
 
 private:
-    HANDLE handle_;
-    Crc32 crc_;
-    uint64_t bytes_ = 0;
-    bool failed_ = false;
+    HANDLE handle_;        ///< 容器文件句柄（由 ArchiveWriter 持有）
+    Crc32 crc_;            ///< 本区内容的累计校验和
+    uint64_t bytes_ = 0;   ///< 本区已写字节数
+    bool failed_ = false;  ///< 写失败过就一直为 true
 };
 
+// 构造和析构必须定义在这里而不是头文件里：sink_ 指向的 RegionSink
+// 只在本文件里有完整定义，头文件里生成不出销毁它的代码。
 ArchiveWriter::ArchiveWriter() = default;
 
 ArchiveWriter::~ArchiveWriter() {
@@ -290,6 +318,7 @@ ArchiveWriter::~ArchiveWriter() {
     if (phase_ != Phase::kDone) Abort();
 }
 
+/// 出错时统一的收尾：拼出带系统错误描述的消息，删掉半成品，返回失败。
 Status ArchiveWriter::Fail(const std::wstring& what, std::wstring* error) {
     if (error != nullptr) {
         *error = what + L"：" + platform::FormatWinError(GetLastError());
@@ -298,8 +327,10 @@ Status ArchiveWriter::Fail(const std::wstring& what, std::wstring* error) {
     return Status::kFailed;
 }
 
+/// 创建容器，并写出开头的三段：占位文件头、流水线描述、源根路径。
 Status ArchiveWriter::Open(const std::wstring& path, const std::wstring& source_root,
                            const PipelineDesc& pipeline, std::wstring* error) {
+    // 源根路径存成 UTF-8。长度字段只有 2 字节，超长要明确报错而不是截断。
     source_root_utf8_ = ToUtf8(source_root);
     if (source_root_utf8_.size() > kMaxSourceRootUtf8) {
         if (error != nullptr) {
@@ -308,10 +339,12 @@ Status ArchiveWriter::Open(const std::wstring& path, const std::wstring& source_
         return Status::kBadArgs;
     }
 
+    // 流水线描述："packer=...;stages=..." 这一行。
     pipeline_text_ = pipeline.Serialize();
 
-    // Write beside the destination, then publish only a complete archive. A failed
-    // or cancelled replacement must never truncate an existing usable backup.
+    // 先写到目标旁边的临时文件（名字加 .partial-进程号 后缀），全部写完、
+    // 刷盘之后才在 Close 里改名成正式文件名。这样备份中途失败或被取消时，
+    // 目标位置原有的那份完好备份不会被截断或覆盖。
     destination_ = path;
     const std::wstring temporary = path + L".partial-" + std::to_wstring(GetCurrentProcessId());
     file_.Reset(CreateFileW(platform::ToExtendedPath(temporary).c_str(), GENERIC_WRITE, 0, nullptr,
@@ -325,6 +358,7 @@ Status ArchiveWriter::Open(const std::wstring& path, const std::wstring& source_
     }
     path_ = temporary;
 
+    // 文件头里现在就能确定的字段先填上，其余（各区大小）等 Close 时回填。
     header_ = ArchiveHeader();
     header_.created_at = NowAsFileTime();
     header_.source_root = source_root;
@@ -344,11 +378,13 @@ Status ArchiveWriter::Open(const std::wstring& path, const std::wstring& source_
         return Fail(L"写容器头部失败", error);
     }
 
+    // 进入数据区阶段，DataSink() 返回的就是这个写入器。
     sink_.reset(new RegionSink(file_.Get()));
     phase_ = Phase::kData;
     return Status::kOk;
 }
 
+/// 数据区的写入端。引擎把"打包 → 压缩 → 加密"之后的字节写到这里。
 ISink& ArchiveWriter::DataSink() {
     return *sink_;
 }
@@ -365,6 +401,7 @@ void ArchiveWriter::EndData() {
     phase_ = Phase::kIndex;
 }
 
+/// 索引区的写入端，EndData() 之后使用。
 ISink& ArchiveWriter::IndexSink() {
     return *sink_;
 }
@@ -391,6 +428,7 @@ Status ArchiveWriter::Close(uint64_t entry_count, uint64_t total_original_bytes,
     index_bytes_ = sink_->Bytes();
     index_crc_ = sink_->Crc();
 
+    // 现在各区的大小都知道了，补全文件头字段。
     header_.entry_count = entry_count;
     header_.total_original_bytes = total_original_bytes;
     header_.data_size = data_bytes_;
@@ -417,6 +455,7 @@ Status ArchiveWriter::Close(uint64_t entry_count, uint64_t total_original_bytes,
     writer.WriteZeros(kHeaderReservedLen);
     if (head.size() != kFileHeaderSize) return Fail(L"头部长度不对", error);
 
+    // 头部本身的校验和，记进尾部。
     const uint32_t header_crc = ComputeCrc32(head.data(), head.size());
 
     // ---- 尾部 ----
@@ -443,6 +482,9 @@ Status ArchiveWriter::Close(uint64_t entry_count, uint64_t total_original_bytes,
 
     sink_.reset();
     file_.Reset();
+    // 全部写好、刷到磁盘之后，才把临时文件改名成正式文件名。临时文件和目标
+    // 在同一目录（同一个卷）里，改名是一步完成的：目标位置要么是旧的完整备份，
+    // 要么是新的完整备份，不会出现写了一半的。
     if (!MoveFileExW(platform::ToExtendedPath(path_).c_str(),
                      platform::ToExtendedPath(destination_).c_str(),
                      MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
@@ -453,7 +495,7 @@ Status ArchiveWriter::Close(uint64_t entry_count, uint64_t total_original_bytes,
     return Status::kOk;
 }
 
-// 关闭并删除半成品，可以重复调用。
+// 关闭并删除半成品（也就是那个 .partial 临时文件），可以重复调用。
 //
 // 先 reset sink_ 再 reset file_：sink_ 里存着裸 HANDLE，句柄关掉之后
 // 它就成了悬垂引用。虽然 Abort 之后没人会再往里写，但顺序反了就是个
@@ -488,6 +530,7 @@ Status ArchiveReader::Open(const std::wstring& path, std::wstring* error) {
         return Status::kFailed;
     };
 
+    // ---- 第一层：只读 128 字节就能判断的 ----
     platform::ScopedHandle file = platform::OpenForRead(path, true);
     if (!file.IsValid()) {
         return fail(L"无法打开 " + path + L"：" + platform::FormatWinError(GetLastError()));
@@ -509,6 +552,7 @@ Status ArchiveReader::Open(const std::wstring& path, std::wstring* error) {
         }
     }
 
+    // 开头 4 个字节必须是魔数 CBKF，不是就根本不是我们的文件。
     ByteReader reader(head);
     char magic[4] = {};
     reader.ReadBytes(magic, sizeof(magic));
@@ -516,6 +560,7 @@ Status ArchiveReader::Open(const std::wstring& path, std::wstring* error) {
         return fail(L"magic 不是 CBKF，这不是一个 .cbk 容器");
     }
 
+    // 按固定顺序逐字段读出文件头（小端）。越界不会崩，最后统一查一次 IsOk()。
     ArchiveHeader parsed;
     parsed.format_version = reader.ReadU16();
     parsed.flags = reader.ReadU16();
@@ -531,13 +576,15 @@ Status ArchiveReader::Open(const std::wstring& path, std::wstring* error) {
     const uint16_t source_root_len = reader.ReadU16();
     if (!reader.IsOk()) return fail(L"头部字段读取越界");
 
+    // 版本号不一致说明是别的版本的程序写的，格式可能不同，不能硬读。
     if (parsed.format_version != kFormatVersion) {
         return fail(L"容器格式版本是 " + std::to_wstring(parsed.format_version) + L"，本程序只认 " +
                     std::to_wstring(kFormatVersion));
     }
     if (header_size != kFileHeaderSize) return fail(L"头部长度字段不是 128");
 
-    // 布局不变式。对不上说明头部损坏，或者是别的工具生成的文件。
+    // ---- 第二层：布局不变式，纯算术，不读任何额外数据 ----
+    // 对不上说明头部损坏，或者是别的工具生成的文件。
     // 这是白捡的一道完整性检查，比等到解数据区才发现好得多。
     const uint64_t expected_data_offset =
         kFileHeaderSize + static_cast<uint64_t>(pipeline_len) + source_root_len;
@@ -552,6 +599,7 @@ Status ArchiveReader::Open(const std::wstring& path, std::wstring* error) {
     }
 
     // ---- PipelineDesc 与源根 ----
+    // 紧跟在文件头后面，两段的长度都记在文件头里。
     std::vector<uint8_t> prologue(static_cast<size_t>(pipeline_len) + source_root_len);
     if (!prologue.empty()) {
         DWORD got = 0;
@@ -569,6 +617,7 @@ Status ArchiveReader::Open(const std::wstring& path, std::wstring* error) {
         reinterpret_cast<const char*>(prologue.data()) + pipeline_len, source_root_len));
 
     // ---- 尾部 ----
+    // 文件最后 64 字节：魔数 CBKE、冗余的索引区偏移、三个 CRC32。
     if (!SeekTo(file.Get(), total_size - kFooterSize)) return fail(L"定位尾部失败");
     std::vector<uint8_t> footer(kFooterSize);
     {
@@ -594,19 +643,24 @@ Status ArchiveReader::Open(const std::wstring& path, std::wstring* error) {
         return fail(L"头尾记录的 indexOffset 不一致");
     }
 
+    // 全部通过才记下来。中途任何一步失败，对象都保持"未打开"状态。
     path_ = path;
     header_ = std::move(parsed);
     return Status::kOk;
 }
 
+/// 数据区的流式读取端（经过了打包、压缩、加密的那部分字节）。
 std::unique_ptr<ISource> ArchiveReader::OpenData() const {
     return OpenRange(path_, header_.data_offset, header_.data_size);
 }
 
+/// 索引区的流式读取端。
 std::unique_ptr<ISource> ArchiveReader::OpenIndex() const {
     return OpenRange(path_, header_.index_offset, header_.index_size);
 }
 
+/// 第三层校验：重算头部、数据区、索引区三个 CRC32，与尾部记录的逐一比对。
+/// 要把整个文件读一遍，所以不放在 Open 里，只在 cbk verify 时做。
 Status ArchiveReader::Verify(std::wstring* error) const {
     const auto fail = [error](const std::wstring& what) {
         if (error != nullptr) *error = what;

@@ -39,13 +39,20 @@ inline constexpr char kNativePackerName[] = "cbk-native";
 /// 引擎按 kIoBlockSize（64 KB）分块，64 MB 留了三个数量级的余量。
 inline constexpr uint32_t kMaxNativeChunkSize = 64u * 1024 * 1024;
 
+/// 原生打包器。打包时引擎依次调用 BeginEntry → WriteData×N → EndEntry，
+/// 全部条目结束后调用 Finish；解包时调用 Unpack 一次性按顺序回放。
 class NativePacker : public IPacker {
 public:
+    /// 注册名 "cbk-native"。
     std::string Name() const override { return kNativePackerName; }
 
+    /// 写条目头（长度前缀 + EntryMeta 记录体）。
     void BeginEntry(const EntryMeta& meta, ISink& out) override;
+    /// 写一段内容，带 4 字节块长度。
     void WriteData(const uint8_t* data, size_t len, ISink& out) override;
+    /// 写内容结束标记（长度为 0 的块）。
     void EndEntry(ISink& out) override;
+    /// 什么都不做：本格式没有全局结束标记。
     void Finish(ISink& out) override;
 
     /// 解析失败会抛 std::runtime_error——容器损坏属于不可恢复的失败，
