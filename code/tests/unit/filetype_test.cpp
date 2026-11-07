@@ -23,6 +23,7 @@
 #include "cbk/stage.h"
 #include "cbk/text.h"
 #include "cbk/types.h"
+#include "src/metadata.h"
 #include "src/platform_win.h"
 #include "src/reparse.h"
 #include "src/scanner.h"
@@ -80,6 +81,14 @@ cbk::RestoreOptions RestoreTo(const std::wstring& archive, const std::wstring& d
     options.archive = archive;
     options.dest_root = dest;
     return options;
+}
+
+/// 读一个路径的属主 + 属组 + DACL（SDDL 文本），读不到返回空串。
+std::string SddlOf(const std::wstring& path) {
+    std::string sddl;
+    uint32_t error = 0;
+    cbk::ReadSecurityDescriptor(path, &sddl, &error);
+    return sddl;
 }
 
 /// 一个文件实体被几个目录项指着。
@@ -140,6 +149,71 @@ TEST(FileType, JunctionRoundTrips) {
     pf::ScopedHandle through =
         pf::OpenForRead(temp.At(L"back\\联接\\里面.txt"), /*no_follow=*/false);
     EXPECT_TRUE(through.IsValid()) << "junction 建出来了但穿不过去";
+}
+
+TEST(FileType, JunctionKeepsItsOwnTimestampsAndAttributes) {
+    // 链接自身也有时间戳和属性位。以前还原链接后完全不设元数据，
+    // junction 的创建/修改时间都变成了"还原的那一刻"。
+    EnsureRegistered();
+    cbk_test::TempDir temp;
+    temp.MakeDir(L"src");
+    const std::wstring target = temp.MakeDir(L"目标目录");
+    const std::wstring link = temp.At(L"src\\联接");
+    uint32_t error = 0;
+    ASSERT_TRUE(cbk::CreateJunction(link, target, &error));
+
+    // 给链接本身设一组过去的时间和隐藏位（no_follow=true，不碰目标）。
+    cbk::EntryMeta wanted;
+    wanted.creation_time = 0x01D0000000000001ull;
+    wanted.last_access_time = 0x01D0000000000002ull;
+    wanted.last_write_time = 0x01D0000000000003ull;
+    ASSERT_TRUE(cbk::ApplyTimestamps(link, wanted, true, &error)) << "Win32 错误 " << error;
+    ASSERT_NE(0, SetFileAttributesW(pf::ToExtendedPath(link).c_str(),
+                                    FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT |
+                                        FILE_ATTRIBUTE_HIDDEN));
+    const std::string target_sddl_before = SddlOf(target);
+
+    ASSERT_EQ(cbk::Status::kOk,
+              cbk::RunBackup(BackupTo(temp.At(L"src"), temp.At(L"o.cbk")), nullptr).status);
+    ASSERT_EQ(cbk::Status::kOk,
+              cbk::RunRestore(RestoreTo(temp.At(L"o.cbk"), temp.At(L"back")), nullptr).status);
+
+    cbk::EntryMeta restored;
+    ASSERT_TRUE(cbk::ReadMetadataByPath(temp.At(L"back\\联接"), true, &restored));
+    EXPECT_EQ(wanted.creation_time, restored.creation_time);
+    EXPECT_EQ(wanted.last_write_time, restored.last_write_time);
+    EXPECT_NE(0u, restored.attributes & FILE_ATTRIBUTE_HIDDEN) << "链接的隐藏位没还原";
+    EXPECT_NE(0u, restored.attributes & FILE_ATTRIBUTE_REPARSE_POINT) << "还原出来已不是链接";
+
+    // 链接不设 ACL：设了会顺着链接改到目标上。
+    EXPECT_EQ(target_sddl_before, SddlOf(target)) << "还原链接时改动了链接目标的权限";
+}
+
+TEST(FileType, SymlinkKeepsItsOwnTimestamps) {
+    EnsureRegistered();
+    cbk_test::TempDir temp;
+    if (!CanCreateSymlinks(temp)) GTEST_SKIP() << "本机建不了符号链接（需要管理员或开发者模式）";
+    temp.MakeDir(L"src");
+    temp.MakeFile(L"src\\真文件.txt", "内容");
+    const std::wstring link = temp.At(L"src\\链接.txt");
+    uint32_t error = 0;
+    ASSERT_TRUE(cbk::CreateSymlink(link, L"真文件.txt", false, &error));
+
+    cbk::EntryMeta wanted;
+    wanted.creation_time = 0x01D0000000000011ull;
+    wanted.last_access_time = 0x01D0000000000012ull;
+    wanted.last_write_time = 0x01D0000000000013ull;
+    ASSERT_TRUE(cbk::ApplyTimestamps(link, wanted, true, &error)) << "Win32 错误 " << error;
+
+    ASSERT_EQ(cbk::Status::kOk,
+              cbk::RunBackup(BackupTo(temp.At(L"src"), temp.At(L"o.cbk")), nullptr).status);
+    ASSERT_EQ(cbk::Status::kOk,
+              cbk::RunRestore(RestoreTo(temp.At(L"o.cbk"), temp.At(L"back")), nullptr).status);
+
+    cbk::EntryMeta restored;
+    ASSERT_TRUE(cbk::ReadMetadataByPath(temp.At(L"back\\链接.txt"), true, &restored));
+    EXPECT_EQ(wanted.creation_time, restored.creation_time);
+    EXPECT_EQ(wanted.last_write_time, restored.last_write_time);
 }
 
 TEST(FileType, FollowModeTurnsJunctionIntoRealDirectory) {
