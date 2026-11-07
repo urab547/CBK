@@ -5,6 +5,7 @@
 #   .\scripts\demo\make_demo_data.ps1 -BigSizeGB 2        大文件改成 2 GB
 #   .\scripts\demo\make_demo_data.ps1 -SkipBig            不生成大文件（快速重建其它几组）
 #   .\scripts\demo\make_demo_data.ps1 -Root E:\Demo       换个位置
+#   .\scripts\demo\make_demo_data.ps1 -CleanRestore        只清空 backup 和 restore，演示数据不动（彩排用）
 #
 # 生成的目录：
 #   <Root>\src\01-简单         几个文件，演示最基本的备份还原
@@ -24,7 +25,8 @@ param(
     [string]$Root = "D:\CBK-Demo",
     [double]$BigSizeGB = 1,
     [int]$SmallFiles = 2000,
-    [switch]$SkipBig
+    [switch]$SkipBig,
+    [switch]$CleanRestore
 )
 
 $ErrorActionPreference = "Stop"
@@ -75,6 +77,12 @@ if (Test-Path -LiteralPath $Root) {
 $src = Join-Path $Root "src"
 $backup = Join-Path $Root "backup"
 $restore = Join-Path $Root "restore"
+
+if ($CleanRestore) {
+    foreach ($dir in @($backup, $restore)) { [CbkDemo]::DeleteTree($dir); [CbkDemo]::EnsureDir($dir) }
+    Write-Host "已清空 $backup 和 $restore，演示数据保持不变。"
+    exit 0
+}
 
 Section "清理旧数据：$Root"
 foreach ($dir in @($src, $backup, $restore)) { [CbkDemo]::DeleteTree($dir) }

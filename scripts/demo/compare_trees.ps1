@@ -258,7 +258,12 @@ Write-Host ("   · 访问时间   {0} 个不同（仅供参考：Windows 读文�
 if ($failures.Count -gt 0) {
     Write-Host ""
     Write-Host "不一致的地方：" -ForegroundColor Red
-    @($failures.ToArray()) | Select-Object -First 40 | Format-Table -AutoSize -Wrap 路径, 检查项, 源, 还原 | Out-Host
+    # 值可能很长（权限列表），表格会把"还原"一列挤出屏幕，所以每处分三行列出。
+    foreach ($f in (@($failures.ToArray()) | Select-Object -First 40)) {
+        Write-Host ("   × {0}  [{1}]" -f $f.路径, $f.检查项) -ForegroundColor Red
+        Write-Host ("       源：  {0}" -f $f.源)
+        Write-Host ("       还原：{0}" -f $f.还原)
+    }
     if ($failures.Count -gt 40) { Write-Host "   ……共 $($failures.Count) 处，只显示前 40 处" }
     if ((@($failures.ToArray()) | Where-Object { $_.检查项 -eq "属主" }).Count -gt 0) {
         Write-Host "   提示：还原属主需要管理员权限（SeRestorePrivilege）。非管理员还原时属主会保持为当前用户，cbk 会发出告警。" -ForegroundColor Yellow
