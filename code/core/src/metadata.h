@@ -105,10 +105,16 @@ bool ApplyAttributes(const std::wstring& path, const EntryMeta& meta, uint32_t* 
 ///
 /// ## 三个绕不开的现实问题
 ///
-/// **① 设置属主需要 SeRestorePrivilege。** 普通用户只能把属主设成自己或
-/// 自己所属的组。没有特权时整个 SetNamedSecurityInfoW 调用会失败——
-/// 连 DACL 也一起设不上。所以这里会**退一步只设 DACL 再试一次**，
-/// 并通过 owner_skipped 告诉调用方去发 warn。
+/// **① 设置属主有门槛。** 要么有 SeRestorePrivilege，要么在目标上有
+/// WRITE_OWNER 访问权——跟"要设成谁"无关，设成自己也一样要。而非提权
+/// 用户在 D 盘这类位置通常只有"修改"权限，不含 WRITE_OWNER。
+///
+/// 所以先读目标当前的属主和属组，**已经一样的段直接不设**。自己还原自己
+/// 的文件时属主天然就对，这一步让最常见的场景完全不碰这道门槛。
+///
+/// 确实不同、又设不上时，整个 SetNamedSecurityInfoW 调用会失败——连 DACL
+/// 也一起设不上。这时**退一步只设 DACL 再试一次**，并通过 owner_skipped
+/// 告诉调用方去发 warn。
 ///
 /// **② 继承标志要显式控制。** SDDL 里的 `P` 表示这份 DACL 阻断继承、
 /// `AI` 表示是继承来的。但 SetNamedSecurityInfoW **不看 SDDL 里的 P**，
