@@ -40,8 +40,12 @@
 4. 从同一个管理员 PowerShell 启动界面：
 
    ```powershell
-   python gui\gui.py
+   Start-Process python gui\gui.py
    ```
+
+   用 `Start-Process` 在后台启动，界面弹出来以后这个窗口还能继续敲命令（跑对比脚本要用）。
+   直接写 `python gui\gui.py` 的话，界面开着时这个窗口会一直被占住。
+   界面同样带管理员身份，因为它是从管理员窗口里启动的。
 
 5. 按下面第二节完整彩排一遍。彩排完清掉备份和还原结果（演示数据不动）：
 
@@ -54,8 +58,11 @@
 ## 二、演示流程（5 分钟）
 
 每一组都是同一个套路：**GUI 备份 → GUI 还原 → 跑对比脚本看 √**。
-备份包统一放 `D:\CBK-Demo\backup\`，还原目标统一是 `D:\CBK-Demo\restore\<同名目录>`，
-对比脚本靠编号自动找到这两个目录。
+
+- 备份包统一放 `D:\CBK-Demo\backup\`；打包格式保持默认（tar）即可。
+- **恢复目录一律选 `D:\CBK-Demo\restore`**。程序会自动在下面建一个和源目录同名的文件夹，
+  比如备份的是 `04-特殊文件`，还原结果就在 `D:\CBK-Demo\restore\04-特殊文件`。
+- 对比脚本靠编号自动找到源目录和还原结果。
 
 | 顺序 | 数据 | 时间 | 要点 |
 |---|---|---|---|
@@ -69,7 +76,7 @@
 
 - **备份页**：源目录选 `D:\CBK-Demo\src\02-复杂`，输出选 `D:\CBK-Demo\backup\02-复杂.cbk`。
   可以选一个压缩算法（如 lz77）顺便展示压缩：10 MB 能压到 3 MB 左右，不到 1 秒。
-- **恢复页**：选刚才的备份，目标目录 `D:\CBK-Demo\restore\02-复杂`。
+- **恢复页**：选刚才的备份，恢复目录选 `D:\CBK-Demo\restore`。
 - 对比：
 
   ```powershell
@@ -154,10 +161,10 @@ fsutil hardlink list "D:\CBK-Demo\restore\04-特殊文件\硬链接\三个名字
 
 #### 加分演示（时间够的话）
 
-1. **"不恢复元数据"对照**：恢复页勾选"不恢复元数据"，还原到 `D:\CBK-Demo\restore\05-不恢复元数据`，然后
+1. **"不恢复元数据"对照**：恢复页勾选"不恢复元数据"，恢复目录选 `D:\CBK-Demo\restore\对照`（结果会在 `对照\05-元数据` 里），然后
 
    ```powershell
-   .\scripts\demo\compare_trees.ps1 -Source "D:\CBK-Demo\src\05-元数据" -Restored "D:\CBK-Demo\restore\05-不恢复元数据"
+   .\scripts\demo\compare_trees.ps1 -Source "D:\CBK-Demo\src\05-元数据" -Restored "D:\CBK-Demo\restore\对照\05-元数据"
    ```
 
    时间戳、属性、权限都会变成 ×——反过来证明正常还原时确实是程序把它们设回去的。
@@ -175,7 +182,8 @@ fsutil hardlink list "D:\CBK-Demo\restore\04-特殊文件\硬链接\三个名字
 | 生成数据时提示"符号链接只建出 0 / 4 个" | 没用管理员运行。关掉 PowerShell，右键"以管理员身份运行"后重新生成 |
 | 还原时告警"建符号链接失败，已降级为空占位" | 同上：GUI 也要从管理员 PowerShell 启动 |
 | 对比结果里属主是 × | 还原时不是管理员，属主没法改回 SYSTEM，这是预期的降级行为 |
-| 对比提示"还原目录不存在" | 还原目标目录名要和源目录同名，如 `D:\CBK-Demo\restore\04-特殊文件` |
+| 对比提示"还原目录不存在" | 恢复目录要选 `D:\CBK-Demo\restore` 本身，不要再往下选一层 |
+| 运行对比脚本时窗口敲不了命令 | 界面是用 `python gui\gui.py` 启动的，窗口被占住了。另开一个 PowerShell 窗口跑对比，或以后用 `Start-Process python gui\gui.py` 启动界面 |
 | 第二次还原后对比出现"多出来的" | 上次的还原结果还在、选了"重命名"。先 `make_demo_data.ps1 -CleanRestore` |
 | 访问时间显示"N 个不同" | 正常。Windows 读文件时会自动刷新访问时间，备份读源文件时就已经变了，只作参考 |
 | 对比表里的时间和文件属性里看到的不一样 | 对比脚本按本机时区显示，精确到 7 位小数；资源管理器只显示到分钟。包里存的是 UTC 原值 |

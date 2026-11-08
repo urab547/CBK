@@ -280,7 +280,8 @@ foreach ($dir in Get-ChildItem -LiteralPath $src -Directory) {
 Write-Host ""
 Write-Host "   演示数据：$src"
 Write-Host "   备份包放：$backup"
-Write-Host "   还原到：  $restore\<同名目录>"
+Write-Host "   恢复目录：$restore（程序会在下面自动建同名文件夹）"
+Write-Host "   启动界面：Start-Process python gui\gui.py"
 Write-Host "   对比命令：.\scripts\demo\compare_trees.ps1 04      （04 换成要对比的编号）"
 if ($notes.Count -gt 0) {
     Write-Host ""
