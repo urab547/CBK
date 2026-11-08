@@ -36,6 +36,7 @@ struct RestoreOptions {
     std::string password;
     OverwritePolicy overwrite = OverwritePolicy::kSkip;
     bool restore_metadata = true;  ///< --no-metadata 时为 false
+    bool include_source_root = false;  ///< 在 dest_root 下创建原文件夹；核心 API 保持旧默认
 };
 
 struct EngineResult {

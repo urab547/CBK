@@ -451,7 +451,7 @@ class RestoreTab(QWidget):
 
         form = QFormLayout()
         form.addRow("归档文件：", arc_row)
-        form.addRow("恢复目录：", dst_row)
+        form.addRow("恢复到：", dst_row)
         form.addRow("已存在文件：", self.overwrite_box)
         form.addRow("", self.no_metadata)
         form.addRow("", self.use_password)
@@ -462,9 +462,9 @@ class RestoreTab(QWidget):
         self.run_btn.clicked.connect(self._on_click)
 
         self.archive_edit.setPlaceholderText("选择需要恢复的 .cbk 归档")
-        self.dest_edit.setPlaceholderText("选择文件恢复到的目录")
+        self.dest_edit.setPlaceholderText("选择父目录，将自动创建原文件夹")
         self.password_edit.setPlaceholderText("加密归档请填写密码")
-        layout = _page_layout(self, "恢复文件", "从备份归档还原文件，并选择已存在文件的处理方式。")
+        layout = _page_layout(self, "恢复文件", "在所选目录下恢复原文件夹及其内容；同名目录已存在时合并，文件按所选策略处理。")
         layout.addWidget(_card("恢复选项", form))
         layout.addWidget(self.run_btn, 0, Qt.AlignRight)
 

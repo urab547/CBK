@@ -190,6 +190,7 @@ struct Args {
     bool password_stdin = false;        ///< --password-stdin 从标准输入读密码
     bool follow_symlinks = false;       ///< --follow-symlinks 跟随链接
     bool no_metadata = false;           ///< --no-metadata 还原时不设元数据
+    bool contents_only = false;         ///< --contents-only 不创建原文件夹
     bool json = false;                  ///< --json list 命令输出 JSON
     bool progress_json = false;         ///< --progress json 输出进度事件流
 
@@ -260,6 +261,8 @@ Args ParseArgs(const std::vector<std::wstring>& argv, size_t start) {
             args.follow_symlinks = true;
         } else if (option == L"--no-metadata") {
             args.no_metadata = true;
+        } else if (option == L"--contents-only") {
+            args.contents_only = true;
         } else if (option == L"--json") {
             args.json = true;
         } else {
@@ -360,6 +363,7 @@ int CommandRestore(const Args& args) {
     options.archive = args.archive;
     options.dest_root = args.dest;
     options.restore_metadata = !args.no_metadata;
+        options.include_source_root = !args.contents_only;
     if (args.overwrite == L"skip") {
         options.overwrite = cbk::OverwritePolicy::kSkip;
     } else if (args.overwrite == L"force") {
@@ -468,7 +472,8 @@ void PrintUsage() {
         "           [--password-stdin] [--follow-symlinks] [--progress json]\n"
         "  restore  --archive <文件.cbk> --dest <目录>\n"
         "           [--password-stdin] [--overwrite skip|force|rename]\n"
-        "           [--no-metadata] [--progress json]\n"
+        "           [--no-metadata] [--contents-only] [--progress json]\n"
+        "           默认在目标目录下恢复原文件夹；--contents-only 只恢复其中内容\n"
         "  list     --archive <文件.cbk> [--json] [--password-stdin]\n"
         "  verify   --archive <文件.cbk>\n"
         "  info     输出本程序支持的算法列表（JSON）\n"
