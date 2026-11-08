@@ -255,7 +255,10 @@ class BackupTab(QWidget):
 
         # ---- 打包器 / 压缩（回到主表单） ----
         self.packer_box = SelectionBox()
-        self.packer_box.addItems(algs.get("packers") or ["cbk-native"])
+        self.packer_box.addItems(algs.get("packers") or ["tar"])
+        # 默认选 tar：cpio（newc）单个文件不能超过 4 GB，tar 没有这个限制。
+        if self.packer_box.findText("tar") >= 0:
+            self.packer_box.setCurrentText("tar")
 
         self.compress_box = SelectionBox()
         self.compress_box.addItem("不压缩", userData=None)

@@ -24,7 +24,7 @@ ctest --preset release           # 跑单元测试
 最后一条应该输出一行 JSON：
 
 ```json
-{"formatVersion":1,"packers":["cbk-native","cpio","tar"],"compressors":["huffman","lz77"],"ciphers":["vigenere","xor","xor-cbc"]}
+{"formatVersion":1,"packers":["cpio","tar"],"compressors":["huffman","lz77"],"ciphers":["vigenere","xor","xor-cbc"]}
 ```
 
 这条命令也用于 GUI：

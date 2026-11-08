@@ -66,7 +66,7 @@ ctest --preset release
 .\build\msvc\bin\Release\cbk.exe info
 ```
 
-`info` 的 packers 应包含 `cbk-native` 和 `tar`。选择 tar 的参数是 `--packer tar`：
+`info` 的 packers 应包含 `cpio` 和 `tar`（`cbk-native` 仅内部保留，不再列出）。选择 tar 的参数是 `--packer tar`：
 
 ```powershell
 cbk.exe backup --source <测试目录> --dest <备份路径.cbk> --packer tar --progress json
