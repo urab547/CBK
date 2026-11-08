@@ -217,7 +217,8 @@ bool PipelineDesc::Parse(const std::string& text, PipelineDesc* out) {
 // ============================================================ 索引区
 
 /// 把条目表逐条编码写进索引区。每条记录的格式见 entry_codec.h。
-void WriteIndex(const std::vector<EntryMeta>& entries, ISink& out) {
+void WriteIndex(const std::vector<EntryMeta>& entries, ISink& out, const EntryMeta* source_root) {
+    if (source_root != nullptr) WriteEntryMeta(*source_root, out);
     for (const EntryMeta& entry : entries) {
         WriteEntryMeta(entry, out);
     }
@@ -227,7 +228,20 @@ void WriteIndex(const std::vector<EntryMeta>& entries, ISink& out) {
 //
 // 多一条少一条都说明包不对：少了是被截断，多了是头部被改过。这里不做
 // 任何"能读多少算多少"的容错——索引是还原的地图，地图不完整就不该上路。
-bool ReadIndex(ISource& source, uint64_t expected_count, std::vector<EntryMeta>* out) {
+bool ReadIndex(ISource& source, uint64_t expected_count, std::vector<EntryMeta>* out,
+               bool has_source_root, EntryMeta* source_root) {
+    // 根记录单独解析，不能放宽普通条目的路径安全校验。
+    if (has_source_root) {
+        EntryMeta root;
+        bool end_of_stream = false;
+        if (!ReadEntryMeta(source, &root, &end_of_stream) ||
+            root.type != FileType::kDirectory || root.relative_path != L"." ||
+            root.id != 0 || root.original_size != 0 || root.stored_size != 0 ||
+            root.data_offset != 0 || !root.link_target.empty() || root.hardlink_ref_id != 0) {
+            return false;
+        }
+        if (source_root != nullptr) *source_root = std::move(root);
+    }
     std::vector<EntryMeta> entries;
     for (;;) {
         EntryMeta entry;
@@ -329,7 +343,8 @@ Status ArchiveWriter::Fail(const std::wstring& what, std::wstring* error) {
 
 /// 创建容器，并写出开头的三段：占位文件头、流水线描述、源根路径。
 Status ArchiveWriter::Open(const std::wstring& path, const std::wstring& source_root,
-                           const PipelineDesc& pipeline, std::wstring* error) {
+                           const PipelineDesc& pipeline, std::wstring* error,
+                           bool has_source_root_metadata) {
     // 源根路径存成 UTF-8。长度字段只有 2 字节，超长要明确报错而不是截断。
     source_root_utf8_ = ToUtf8(source_root);
     if (source_root_utf8_.size() > kMaxSourceRootUtf8) {
@@ -364,6 +379,7 @@ Status ArchiveWriter::Open(const std::wstring& path, const std::wstring& source_
     header_.source_root = source_root;
     header_.pipeline = pipeline;
     header_.flags = ComputeFlags(pipeline);
+    if (has_source_root_metadata) header_.flags |= kFlagSourceRootMetadata;
     header_.data_offset = kFileHeaderSize + pipeline_text_.size() + source_root_utf8_.size();
 
     // 先写一份占位头部，最后 Close 时再回填真实的偏移和长度。

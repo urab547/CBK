@@ -80,6 +80,8 @@ struct ArchiveHeader {
 inline constexpr uint16_t kFlagPacked = 1u << 0;
 inline constexpr uint16_t kFlagCompressed = 1u << 1;
 inline constexpr uint16_t kFlagEncrypted = 1u << 2;
+// 索引前置一条独立的源根目录元数据记录，不计入 entry_count，不进入打包数据流。
+inline constexpr uint16_t kFlagSourceRootMetadata = 1u << 3;
 
 /// source_root 转成 UTF-8 后的长度上限——头部里那个字段只有 2 字节。
 ///
@@ -93,13 +95,15 @@ inline constexpr size_t kMaxSourceRootUtf8 = 0xFFFF;
 // ============================================================================
 
 /// 把条目表序列化进索引区。
-void WriteIndex(const std::vector<EntryMeta>& entries, ISink& out);
+void WriteIndex(const std::vector<EntryMeta>& entries, ISink& out,
+                const EntryMeta* source_root = nullptr);
 
 /// 从索引区解析条目表。
 ///
 /// @param expected_count 头部记的条目数，用于校验读出来的条数对不对得上。
 /// @return 记录损坏、或条数与头部不符时返回 false。
-bool ReadIndex(ISource& source, uint64_t expected_count, std::vector<EntryMeta>* out);
+bool ReadIndex(ISource& source, uint64_t expected_count, std::vector<EntryMeta>* out,
+               bool has_source_root = false, EntryMeta* source_root = nullptr);
 
 // ============================================================================
 // 写
@@ -123,7 +127,8 @@ public:
 
     /// 创建文件，写出头部占位、PipelineDesc、源根。
     Status Open(const std::wstring& path, const std::wstring& source_root,
-                const PipelineDesc& pipeline, std::wstring* error);
+                const PipelineDesc& pipeline, std::wstring* error,
+                bool has_source_root_metadata = false);
 
     /// 数据区写入端。引擎把 Packer + Stage 链的输出接到这里。
     ISink& DataSink();

@@ -183,13 +183,14 @@ struct Args {
     std::wstring source;                ///< --source 备份的源目录
     std::wstring dest;                  ///< --dest 备份时是 .cbk 文件，还原时是目标目录
     std::wstring archive;               ///< --archive 要还原/列出/校验的 .cbk 文件
-    std::string packer = "cbk-native";  ///< --packer 打包格式，默认自有格式
+    std::string packer = "tar";         ///< --packer 打包格式，默认 tar
     std::string compress;               ///< --compress 压缩算法名，空表示不压缩
     std::string encrypt;                ///< --encrypt 加密算法名，空表示不加密
     std::wstring overwrite = L"skip";   ///< --overwrite 还原时目标已存在怎么办
     bool password_stdin = false;        ///< --password-stdin 从标准输入读密码
     bool follow_symlinks = false;       ///< --follow-symlinks 跟随链接
     bool no_metadata = false;           ///< --no-metadata 还原时不设元数据
+    bool contents_only = false;         ///< --contents-only 不创建原文件夹
     bool json = false;                  ///< --json list 命令输出 JSON
     bool progress_json = false;         ///< --progress json 输出进度事件流
 
@@ -260,6 +261,8 @@ Args ParseArgs(const std::vector<std::wstring>& argv, size_t start) {
             args.follow_symlinks = true;
         } else if (option == L"--no-metadata") {
             args.no_metadata = true;
+        } else if (option == L"--contents-only") {
+            args.contents_only = true;
         } else if (option == L"--json") {
             args.json = true;
         } else {
@@ -298,15 +301,24 @@ int BadArgs(const std::wstring& message) {
 
 // ============================================================ 各命令
 
-/// cbk info：输出格式版本和已注册的打包器、压缩器、加密器列表。
+/// cbk info：输出格式版本和可供选择的打包器、压缩器、加密器列表。
 /// GUI 启动时调用它来填下拉框，新增算法时界面不用改代码。
+///
+/// cbk-native 不出现在列表里：它是开发初期用来打通流水线的基准格式，
+/// 对外只提供 tar 和 cpio 两种打包算法。它仍然注册在 core 里，
+/// 所以以前用它生成的备份照样能还原、列出、校验，单元测试也照常用它。
 int CommandInfo() {
     const cbk::PackerRegistry& packers = cbk::PackerRegistry::Instance();
     const cbk::StageRegistry& stages = cbk::StageRegistry::Instance();
 
+    std::vector<std::string> listed_packers;
+    for (const std::string& name : packers.Names()) {
+        if (name != "cbk-native") listed_packers.push_back(name);
+    }
+
     std::string out = "{";
     out += "\"formatVersion\":" + std::to_string(cbk::kFormatVersion);
-    out += ",\"packers\":" + JsonArray(packers.Names());
+    out += ",\"packers\":" + JsonArray(listed_packers);
     out += ",\"compressors\":" + JsonArray(stages.Names(cbk::StageKind::kCompress));
     out += ",\"ciphers\":" + JsonArray(stages.Names(cbk::StageKind::kEncrypt));
     out += "}";
@@ -351,6 +363,7 @@ int CommandRestore(const Args& args) {
     options.archive = args.archive;
     options.dest_root = args.dest;
     options.restore_metadata = !args.no_metadata;
+        options.include_source_root = !args.contents_only;
     if (args.overwrite == L"skip") {
         options.overwrite = cbk::OverwritePolicy::kSkip;
     } else if (args.overwrite == L"force") {
@@ -459,7 +472,8 @@ void PrintUsage() {
         "           [--password-stdin] [--follow-symlinks] [--progress json]\n"
         "  restore  --archive <文件.cbk> --dest <目录>\n"
         "           [--password-stdin] [--overwrite skip|force|rename]\n"
-        "           [--no-metadata] [--progress json]\n"
+        "           [--no-metadata] [--contents-only] [--progress json]\n"
+        "           默认在目标目录下恢复原文件夹；--contents-only 只恢复其中内容\n"
         "  list     --archive <文件.cbk> [--json] [--password-stdin]\n"
         "  verify   --archive <文件.cbk>\n"
         "  info     输出本程序支持的算法列表（JSON）\n"

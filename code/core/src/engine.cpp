@@ -695,6 +695,21 @@ EngineResult RunBackup(const BackupOptions& options, IProgressObserver* observer
         return Fail(Status::kBadArgs, L"备份文件必须保存在源目录以外");
     }
     // ---- 遍历：把整棵树摊平成条目表 ----
+    // 在扫描之前取源根自身的元数据，避免遍历影响访问时间。
+    // 根路径是链接时备份其指向目录的元数据，与扫描根目录内容的行为一致。
+    EntryMeta source_root_metadata;
+    source_root_metadata.type = FileType::kDirectory;
+    source_root_metadata.relative_path = L".";
+    if (!ReadMetadataByPath(root, false, &source_root_metadata) ||
+        !(source_root_metadata.attributes & FILE_ATTRIBUTE_DIRECTORY)) {
+        return Fail(Status::kFailed, L"无法读取源文件夹的元数据：" + root);
+    }
+    uint32_t root_security_error = 0;
+    if (!ReadSecurityDescriptor(root, &source_root_metadata.sddl, &root_security_error)) {
+        Warn(observer, root, L"源文件夹权限读取失败：" +
+             platform::FormatWinError(root_security_error), root_security_error);
+        result.status = Status::kPartial;
+    }
     std::vector<EntryMeta> entries;
     ScanStats stats;
     ProgressInfo scan_progress;
@@ -733,7 +748,7 @@ EngineResult RunBackup(const BackupOptions& options, IProgressObserver* observer
     pipeline.stages = options.stages;
 
     std::wstring error;
-    const Status open_status = writer.Open(options.dest_archive, root, pipeline, &error);
+    const Status open_status = writer.Open(options.dest_archive, root, pipeline, &error, true);
     if (open_status != Status::kOk) return Fail(open_status, error);
 
     // 按用户选的打包格式建打包器（默认 cbk-native）。
@@ -879,7 +894,7 @@ EngineResult RunBackup(const BackupOptions& options, IProgressObserver* observer
             return Fail(Status::kBadArgs, error);
         }
         StageChainSink index_chain(std::move(index_stages), &writer.IndexSink());
-        WriteIndex(written, index_chain.Entry());
+        WriteIndex(written, index_chain.Entry(), &source_root_metadata);
         index_chain.Finish();
     } catch (const CancelledByUser&) {
         // 用户取消：删掉写了一半的备份文件。残缺的 .cbk 看着像能用的备份，比没有更糟。
@@ -930,6 +945,9 @@ EngineResult RunRestore(const RestoreOptions& options, IProgressObserver* observ
     }
     const ArchiveHeader& header = reader.Header();
 
+    EntryMeta source_root_metadata;
+    const bool has_source_root_metadata = (header.flags & kFlagSourceRootMetadata) != 0;
+
     // 按包里记录的打包格式建解包器。本程序不认识这种格式就没法还原。
     std::unique_ptr<IPacker> packer = PackerRegistry::Instance().Create(header.pipeline.packer);
     if (packer == nullptr) {
@@ -952,7 +970,8 @@ EngineResult RunRestore(const RestoreOptions& options, IProgressObserver* observ
         // 密码不对时解密出来的是乱码，解析会抛异常或失败，统一报"密码错误或已损坏"。
         bool index_ok = false;
         try {
-            index_ok = ReadIndex(chain, header.entry_count, &entries);
+            index_ok = ReadIndex(chain, header.entry_count, &entries,
+                                 has_source_root_metadata, &source_root_metadata);
         } catch (const std::exception&) {
             return Fail(Status::kFailed, L"密码错误或归档已损坏，无法读取索引");
         }
@@ -971,7 +990,47 @@ EngineResult RunRestore(const RestoreOptions& options, IProgressObserver* observ
     if (!EnsureDirectory(platform::NormalizePath(options.dest_root), &win_error)) {
         return Fail(Status::kFailed, L"无法创建目标目录：" + platform::FormatWinError(win_error));
     }
-    const std::wstring dest = platform::NormalizePath(options.dest_root);
+    std::wstring dest = platform::NormalizePath(options.dest_root);
+    if (options.include_source_root) {
+        // 旧归档也保存了 source_root。只取末级名称，绝不将归档里的绝对路径用作目标。
+        std::wstring source = header.source_root;
+        while (!source.empty() && (source.back() == L'\\' || source.back() == L'/')) {
+            source.pop_back();
+        }
+        const size_t slash = source.find_last_of(L"\\/");
+        std::wstring name = source.substr(slash == std::wstring::npos ? 0 : slash + 1);
+        // 备份整个盘符根目录时，使用稳定的目录名，例如 C_drive。
+        if (name.size() == 2 && name[1] == L':' &&
+            ((name[0] >= L'A' && name[0] <= L'Z') ||
+             (name[0] >= L'a' && name[0] <= L'z'))) {
+            name = name.substr(0, 1) + L"_drive";
+        }
+        std::wstring stem = name.substr(0, name.find(L'.'));
+        for (wchar_t& ch : stem) {
+            if (ch >= L'a' && ch <= L'z') ch -= L'a' - L'A';
+        }
+        const bool reserved = stem == L"CON" || stem == L"PRN" || stem == L"AUX" ||
+                              stem == L"NUL" || stem == L"CONIN$" || stem == L"CONOUT$" ||
+                              (stem.size() == 4 &&
+                               (stem.substr(0, 3) == L"COM" || stem.substr(0, 3) == L"LPT") &&
+                               stem[3] >= L'0' && stem[3] <= L'9');
+        if (name.empty() || name == L"." || name == L".." || reserved ||
+            name.back() == L'.' || name.back() == L' ' ||
+            name.find_first_of(L"<>:\"/\\|?*") != std::wstring::npos ||
+            std::any_of(name.begin(), name.end(), [](wchar_t ch) { return ch < 32; })) {
+            return Fail(Status::kFailed,
+                        L"归档中的源文件夹名称无效，可用 --contents-only 仅恢复内容");
+        }
+        dest = platform::JoinPath(dest, name);
+        const DWORD attributes = GetFileAttributesW(platform::ToExtendedPath(dest).c_str());
+        if (attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_REPARSE_POINT)) {
+            return Fail(Status::kFailed, L"目标中的同名文件夹是链接，请选择其他恢复目录");
+        }
+        if (!EnsureDirectory(dest, &win_error)) {
+            return Fail(Status::kFailed,
+                        L"无法创建原文件夹：" + platform::FormatWinError(win_error));
+        }
+    }
 
     // 通知界面开始还原，并报出总量。
     if (observer != nullptr) {
@@ -1054,6 +1113,12 @@ EngineResult RunRestore(const RestoreOptions& options, IProgressObserver* observ
             ++metadata_progress.done_entries;
             if (observer != nullptr) observer->OnPhase("metadata", metadata_progress);
         }
+        // 外层最后应用，避免创建子项再次改变其时间戳或提前收紧权限。
+        // contents-only 模式不改用户指定的公共目标目录的元数据。
+        if (options.include_source_root && has_source_root_metadata) {
+            if (IsCancelled(observer)) return Fail(Status::kFailed, L"已取消");
+            ApplyEntryMetadata(dest, source_root_metadata, observer);
+        }
     }
 
     // 有条目被跳过就是部分成功。
@@ -1105,7 +1170,8 @@ Status ReadArchiveListing(const std::wstring& path, const std::string& password,
     StageChainSource chain(raw.get(), std::move(stages));
     bool index_ok = false;
     try {
-        index_ok = ReadIndex(chain, header.entry_count, entries);
+        index_ok = ReadIndex(chain, header.entry_count, entries,
+                             (header.flags & kFlagSourceRootMetadata) != 0);
     } catch (const std::exception&) {
         *error = L"密码错误或归档已损坏，无法读取索引";
         return Status::kFailed;
