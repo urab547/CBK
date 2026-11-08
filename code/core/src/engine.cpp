@@ -1018,7 +1018,8 @@ EngineResult RunRestore(const RestoreOptions& options, IProgressObserver* observ
             name.back() == L'.' || name.back() == L' ' ||
             name.find_first_of(L"<>:\"/\\|?*") != std::wstring::npos ||
             std::any_of(name.begin(), name.end(), [](wchar_t ch) { return ch < 32; })) {
-            return Fail(Status::kFailed, L"归档中的源文件夹名称无效，可用 --contents-only 仅恢复内容");
+            return Fail(Status::kFailed,
+                        L"归档中的源文件夹名称无效，可用 --contents-only 仅恢复内容");
         }
         dest = platform::JoinPath(dest, name);
         const DWORD attributes = GetFileAttributesW(platform::ToExtendedPath(dest).c_str());
@@ -1026,7 +1027,8 @@ EngineResult RunRestore(const RestoreOptions& options, IProgressObserver* observ
             return Fail(Status::kFailed, L"目标中的同名文件夹是链接，请选择其他恢复目录");
         }
         if (!EnsureDirectory(dest, &win_error)) {
-            return Fail(Status::kFailed, L"无法创建原文件夹：" + platform::FormatWinError(win_error));
+            return Fail(Status::kFailed,
+                        L"无法创建原文件夹：" + platform::FormatWinError(win_error));
         }
     }
 

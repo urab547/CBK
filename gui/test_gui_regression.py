@@ -103,7 +103,14 @@ class GuiRegression(unittest.TestCase):
             dest = self.root / (archive.stem + "_restored")
             self.restore(archive, "correct密码", dest)
             self.assertEqual(self.window.status_label.text(), "完成")
-            self.assertEqual((dest / "binary").read_bytes(), (self.source / "binary").read_bytes())
+            restored = dest / self.source.name
+            self.assertTrue(restored.is_dir())
+            self.assertFalse((dest / "binary").exists())
+            self.assertEqual(
+                (restored / "binary").read_bytes(), (self.source / "binary").read_bytes()
+            )
+            self.assertEqual((restored / "empty").read_bytes(), b"")
+            self.assertTrue((restored / "空目录").is_dir())
 
     def test_windows_unsigned_exit_codes(self):
         for code in (0xE06D7363, 0xC0000005, 0xFFFFFFFF, -1):
