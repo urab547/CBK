@@ -196,6 +196,58 @@ TEST(Metadata, FileWithoutArchiveBitRoundTripsWithoutGainingIt) {
         GetFileAttributesW(pf::ToExtendedPath(temp.At(L"back\\只有隐藏.txt")).c_str()) & mask);
 }
 
+/// 备份 src 再还原到 back，返回还原后某个文件的可设置属性位。
+DWORD RestoredAttributes(cbk_test::TempDir& temp, bool include_source_root,
+                         const std::wstring& restored_relative) {
+    cbk::BackupOptions backup;
+    backup.source_root = temp.At(L"src");
+    backup.dest_archive = temp.At(L"o.cbk");
+    EXPECT_EQ(cbk::Status::kOk, cbk::RunBackup(backup, nullptr).status);
+    cbk::RestoreOptions restore;
+    restore.archive = temp.At(L"o.cbk");
+    restore.dest_root = temp.At(L"back");
+    restore.include_source_root = include_source_root;
+    EXPECT_EQ(cbk::Status::kOk, cbk::RunRestore(restore, nullptr).status);
+    const std::wstring path = pf::ToExtendedPath(temp.At(L"back\\" + restored_relative));
+    return GetFileAttributesW(path.c_str()) & static_cast<DWORD>(cbk::kSettableAttributes);
+}
+
+TEST(Metadata, ArchiveBitStaysClearedInsideSubdirectories) {
+    // 子目录里的文件：Pass 3 给父目录设 DACL 时，继承传播会给已经还原好的子项
+    // 加上存档位。属性位设得再早也没用，必须在所有权限设完之后再设一遍。
+    cbk::RegisterBuiltinPackers();
+    cbk_test::TempDir temp;
+    temp.MakeDir(L"src");  // MakeDir 只建一层，逐级建
+    temp.MakeDir(L"src\\子目录");
+    temp.MakeDir(L"src\\子目录\\更深");
+    const std::wstring file = temp.MakeFile(L"src\\子目录\\更深\\无存档位.txt", "x");
+    ASSERT_NE(0, SetFileAttributesW(pf::ToExtendedPath(file).c_str(), FILE_ATTRIBUTE_NORMAL));
+
+    EXPECT_EQ(0u, RestoredAttributes(temp, false, L"子目录\\更深\\无存档位.txt"))
+        << "子目录里的文件被加上了存档位";
+}
+
+TEST(Metadata, ArchiveBitStaysClearedWhenSourceRootIsRestored) {
+    // 恢复源文件夹时，根目录的 DACL 最后才设，它的继承传播会波及整棵树。
+    cbk::RegisterBuiltinPackers();
+    cbk_test::TempDir temp;
+    temp.MakeDir(L"src");  // MakeDir 只建一层，逐级建
+    temp.MakeDir(L"src\\子目录");
+    const std::wstring top = temp.MakeFile(L"src\\顶层无存档位.txt", "x");
+    const std::wstring nested = temp.MakeFile(L"src\\子目录\\只读无存档位.txt", "y");
+    ASSERT_NE(0, SetFileAttributesW(pf::ToExtendedPath(top).c_str(), FILE_ATTRIBUTE_NORMAL));
+    ASSERT_NE(0, SetFileAttributesW(pf::ToExtendedPath(nested).c_str(), FILE_ATTRIBUTE_READONLY));
+
+    // include_source_root：还原结果在 back\src\ 下面。
+    EXPECT_EQ(0u, RestoredAttributes(temp, true, L"src\\顶层无存档位.txt"));
+    const std::wstring nested_restored =
+        pf::ToExtendedPath(temp.At(L"back\\src\\子目录\\只读无存档位.txt"));
+    EXPECT_EQ(
+        static_cast<DWORD>(FILE_ATTRIBUTE_READONLY),
+        GetFileAttributesW(nested_restored.c_str()) & static_cast<DWORD>(cbk::kSettableAttributes))
+        << "只读位要保留、存档位不能多出来";
+}
+
 // ============================================================ 时间戳
 
 TEST(Metadata, ApplyTimestampsRoundTripsAt100NsPrecision) {

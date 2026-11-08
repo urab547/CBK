@@ -281,6 +281,20 @@ void ApplyEntryMetadata(const std::wstring& absolute, const EntryMeta& entry,
     }
 }
 
+/// 这个条目还原完之后，属性位会不会被后面的权限设置改坏。
+///
+/// 给目录设 DACL 时，SetNamedSecurityInfoW 会把可继承的 ACE 传播到它下面
+/// **所有已经存在的子项**，而传播会让每个子项被系统加上 FILE_ATTRIBUTE_ARCHIVE。
+/// 子项的属性位早在 Pass 2 就设好了，Pass 3 设父目录、最后设根目录时又被
+/// 加回一个存档位——源端没有存档位的文件，还原出来就平白多一个。
+///
+/// 传播只会**加上**存档位，不会动别的位，所以源端本来就带存档位的条目不受
+/// 影响，只需要把源端没有存档位的那些在最后再设一遍。绝大多数文件都带存档位，
+/// 这一趟通常只涉及很少几个条目。attributes 为 0 表示没记录，不处理。
+bool NeedsAttributePass(uint32_t attributes) {
+    return attributes != 0 && (attributes & FILE_ATTRIBUTE_ARCHIVE) == 0;
+}
+
 /// 确保某个路径上有一个目录：不存在就建，已经是目录就当成功。
 ///
 /// 已存在但**是个文件**时返回失败（ERROR_DIRECTORY）——不能把文件当目录用，
@@ -451,6 +465,7 @@ public:
         // --no-metadata 时只还原内容，不动时间戳、权限、属性。
         if (options_.restore_metadata) {
             ApplyEntryMetadata(target_path_, current_, observer_);
+            RememberForAttributePass();
         }
         ++result_->entries_done;
         writing_ = false;
@@ -462,7 +477,20 @@ public:
         progress_.total_bytes = bytes;
     }
 
+    /// 需要在所有权限设完之后再设一次属性位的条目：(目标路径, 属性位)。
+    /// 原因见 NeedsAttributePass。
+    const std::vector<std::pair<std::wstring, uint32_t>>& AttributePass() const {
+        return attribute_pass_;
+    }
+
 private:
+    /// 当前条目如果会被之后的权限传播改坏属性位，就记下来留给最后一趟重设。
+    void RememberForAttributePass() {
+        if (NeedsAttributePass(current_.attributes)) {
+            attribute_pass_.emplace_back(target_path_, current_.attributes);
+        }
+    }
+
     /// 跳过当前条目：发一条告警并计入"跳过"数，最终退出码会变成 1。
     void Skip(const std::wstring& reason) {
         Warn(observer_, current_.relative_path, reason, 0);
@@ -528,7 +556,10 @@ private:
         uint32_t error = 0;
         if (CreateSymlink(target_path_, current_.link_target, directory, &error)) {
             // 链接自身的时间戳和属性位。降级出来的占位不设——那不是原来的东西。
-            if (options_.restore_metadata) ApplyEntryMetadata(target_path_, current_, observer_);
+            if (options_.restore_metadata) {
+                ApplyEntryMetadata(target_path_, current_, observer_);
+                RememberForAttributePass();
+            }
             ++result_->entries_done;
             return;
         }
@@ -567,7 +598,10 @@ private:
         if (CreateJunction(target_path_, current_.link_target, &error)) {
             // junction 自身的时间戳和属性位。之后不会再往它里面写东西，
             // 所以这里设完就不会被刷新，不用像普通目录那样拖到 Pass 3。
-            if (options_.restore_metadata) ApplyEntryMetadata(target_path_, current_, observer_);
+            if (options_.restore_metadata) {
+                ApplyEntryMetadata(target_path_, current_, observer_);
+                RememberForAttributePass();
+            }
             ++result_->entries_done;
             return;
         }
@@ -632,6 +666,8 @@ private:
     ProgressInfo progress_;          ///< 累计进度
     bool has_current_ = false;       ///< 是否已经开始过至少一个条目
     bool writing_ = false;           ///< 当前条目是否是一个正在写入的普通文件
+    /// 最后一趟要重设属性位的条目（见 NeedsAttributePass）。
+    std::vector<std::pair<std::wstring, uint32_t>> attribute_pass_;
 };
 
 }  // namespace
@@ -706,8 +742,9 @@ EngineResult RunBackup(const BackupOptions& options, IProgressObserver* observer
     }
     uint32_t root_security_error = 0;
     if (!ReadSecurityDescriptor(root, &source_root_metadata.sddl, &root_security_error)) {
-        Warn(observer, root, L"源文件夹权限读取失败：" +
-             platform::FormatWinError(root_security_error), root_security_error);
+        Warn(observer, root,
+             L"源文件夹权限读取失败：" + platform::FormatWinError(root_security_error),
+             root_security_error);
         result.status = Status::kPartial;
     }
     std::vector<EntryMeta> entries;
@@ -930,7 +967,8 @@ EngineResult RunBackup(const BackupOptions& options, IProgressObserver* observer
 
 // 完整的设计说明（为什么分三趟）见 cbk/engine.h。这里的步骤是：
 //   ① 打开容器、读出索引        ② Pass 1：建出所有目录
-//   ③ Pass 2：顺序解包，逐条落盘 ④ Pass 3：逆序给目录设元数据
+//   ③ Pass 2：顺序解包，逐条落盘 ④ Pass 3：逆序给目录设元数据，再设根目录
+//   ⑤ Pass 4：重设被权限继承传播改坏的属性位（只涉及源端没有存档位的条目）
 EngineResult RunRestore(const RestoreOptions& options, IProgressObserver* observer) {
     if (options.archive.empty() || options.dest_root.empty()) {
         return Fail(Status::kBadArgs, L"--archive 和 --dest 都不能为空");
@@ -970,8 +1008,8 @@ EngineResult RunRestore(const RestoreOptions& options, IProgressObserver* observ
         // 密码不对时解密出来的是乱码，解析会抛异常或失败，统一报"密码错误或已损坏"。
         bool index_ok = false;
         try {
-            index_ok = ReadIndex(chain, header.entry_count, &entries,
-                                 has_source_root_metadata, &source_root_metadata);
+            index_ok = ReadIndex(chain, header.entry_count, &entries, has_source_root_metadata,
+                                 &source_root_metadata);
         } catch (const std::exception&) {
             return Fail(Status::kFailed, L"密码错误或归档已损坏，无法读取索引");
         }
@@ -1001,22 +1039,20 @@ EngineResult RunRestore(const RestoreOptions& options, IProgressObserver* observ
         std::wstring name = source.substr(slash == std::wstring::npos ? 0 : slash + 1);
         // 备份整个盘符根目录时，使用稳定的目录名，例如 C_drive。
         if (name.size() == 2 && name[1] == L':' &&
-            ((name[0] >= L'A' && name[0] <= L'Z') ||
-             (name[0] >= L'a' && name[0] <= L'z'))) {
+            ((name[0] >= L'A' && name[0] <= L'Z') || (name[0] >= L'a' && name[0] <= L'z'))) {
             name = name.substr(0, 1) + L"_drive";
         }
         std::wstring stem = name.substr(0, name.find(L'.'));
         for (wchar_t& ch : stem) {
             if (ch >= L'a' && ch <= L'z') ch -= L'a' - L'A';
         }
-        const bool reserved = stem == L"CON" || stem == L"PRN" || stem == L"AUX" ||
-                              stem == L"NUL" || stem == L"CONIN$" || stem == L"CONOUT$" ||
-                              (stem.size() == 4 &&
-                               (stem.substr(0, 3) == L"COM" || stem.substr(0, 3) == L"LPT") &&
-                               stem[3] >= L'0' && stem[3] <= L'9');
-        if (name.empty() || name == L"." || name == L".." || reserved ||
-            name.back() == L'.' || name.back() == L' ' ||
-            name.find_first_of(L"<>:\"/\\|?*") != std::wstring::npos ||
+        const bool reserved =
+            stem == L"CON" || stem == L"PRN" || stem == L"AUX" || stem == L"NUL" ||
+            stem == L"CONIN$" || stem == L"CONOUT$" ||
+            (stem.size() == 4 && (stem.substr(0, 3) == L"COM" || stem.substr(0, 3) == L"LPT") &&
+             stem[3] >= L'0' && stem[3] <= L'9');
+        if (name.empty() || name == L"." || name == L".." || reserved || name.back() == L'.' ||
+            name.back() == L' ' || name.find_first_of(L"<>:\"/\\|?*") != std::wstring::npos ||
             std::any_of(name.begin(), name.end(), [](wchar_t ch) { return ch < 32; })) {
             return Fail(Status::kFailed,
                         L"归档中的源文件夹名称无效，可用 --contents-only 仅恢复内容");
@@ -1118,6 +1154,27 @@ EngineResult RunRestore(const RestoreOptions& options, IProgressObserver* observ
         if (options.include_source_root && has_source_root_metadata) {
             if (IsCancelled(observer)) return Fail(Status::kFailed, L"已取消");
             ApplyEntryMetadata(dest, source_root_metadata, observer);
+        }
+
+        // ---- Pass 4：权限全部设完之后，重设会被传播改坏的属性位 ----
+        // Pass 3 和根目录设 DACL 时的继承传播会给子项加上存档位（见 NeedsAttributePass）。
+        // 文件和链接由 RestoreSink 记下，目录在这里从目录表里挑。
+        std::vector<std::pair<std::wstring, uint32_t>> pass = sink.AttributePass();
+        for (const EntryMeta* entry : directories) {
+            if (NeedsAttributePass(entry->attributes)) {
+                pass.emplace_back(platform::JoinPath(dest, entry->relative_path),
+                                  entry->attributes);
+            }
+        }
+        for (const auto& item : pass) {
+            EntryMeta attributes_only;
+            attributes_only.attributes = item.second;
+            uint32_t attribute_error = 0;
+            if (!ApplyAttributes(item.first, attributes_only, &attribute_error)) {
+                Warn(observer, item.first,
+                     L"属性位设置失败：" + platform::FormatWinError(attribute_error),
+                     attribute_error);
+            }
         }
     }
 
